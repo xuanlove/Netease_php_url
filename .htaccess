@@ -1,0 +1,17 @@
+# Apache 配置 - 禁止访问敏感文件 + URL重写
+
+# 禁止访问敏感文件 (优先于其他规则)
+<FilesMatch "(config\.php|cookie\.txt|\.env|\.htaccess|\.htpasswd|music_api\.php|music_downloader\.php|qr_login\.php)">
+    Require all denied
+</FilesMatch>
+
+# URL重写规则
+RewriteEngine On
+
+# 不重写已存在的文件和目录 (静态文件直接访问)
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# 将所有其他请求转发到 index.php
+RewriteRule ^ index.php [QSA,L]

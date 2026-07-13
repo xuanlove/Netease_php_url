@@ -1,0 +1,3 @@
+# 禁止直接访问下载目录中的文件
+# 文件只能通过 /download API端点访问
+Require all denied

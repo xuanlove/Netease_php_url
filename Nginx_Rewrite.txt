@@ -1,0 +1,72 @@
+# ============================================================
+# Nginx 站点配置 - 网易云音乐 API 服务 (PHP)
+# ============================================================
+#
+# 用法:
+#   1. 将此配置内容复制到 Nginx 站点配置文件中
+#      (通常位于 /etc/nginx/sites-available/ 或 /etc/nginx/conf.d/)
+#   2. 根据实际路径修改 root 和 server_name
+#   3. 测试配置: nginx -t
+#   4. 重载配置: nginx -s reload
+#
+# ============================================================
+
+server {
+    listen 80;
+    # listen 443 ssl;  # 如需 HTTPS，取消注释并配置证书
+    server_name localhost;
+
+    # 站点根目录 (修改为你的实际路径)
+    root /var/www/Netease_php_url;
+    index index.php index.html;
+
+    # 日志
+    access_log /var/log/nginx/netease_access.log;
+    error_log  /var/log/nginx/netease_error.log;
+
+    # ------------------------------------------------------------
+    # 安全: 禁止访问敏感文件
+    # ------------------------------------------------------------
+    location ~ (cookie\.txt|config\.php|\.env|\.htaccess|\.htpasswd|music_api\.php|music_downloader\.php|qr_login\.php)$ {
+        deny all;
+        return 403;
+    }
+
+    # 禁止访问隐藏文件 (如 .git / .svn / .htaccess 等)
+    location ~ /\. {
+        deny all;
+        return 403;
+    }
+
+    # 禁止访问下载目录中的文件 (只能通过 /download API 访问)
+    location ^~ /downloads/ {
+        deny all;
+        return 403;
+    }
+
+    # ------------------------------------------------------------
+    # URL 重写: 将所有请求转发到 index.php (前端控制器模式)
+    # ------------------------------------------------------------
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    # ------------------------------------------------------------
+    # PHP 处理 (FastCGI 传递给 php-fpm)
+    # ------------------------------------------------------------
+    location ~ \.php$ {
+        # fastcgi_pass 127.0.0.1:9000;      # TCP 方式 (默认)
+        fastcgi_pass unix:/run/php/php-fpm.sock;  # Unix socket 方式 (按需选择)
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    # ------------------------------------------------------------
+    # 静态资源缓存优化
+    # ------------------------------------------------------------
+    location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1h;
+        add_header Cache-Control "public, must-revalidate";
+    }
+}
