@@ -70,14 +70,17 @@ class DownloadResult
     public $fileSize;
     public $errorMessage;
     public $musicInfo;
+    /** @var bool|null 元数据写入状态: null=未尝试, true=成功, false=失败 */
+    public $metadataWritten;
 
-    public function __construct(bool $success, string $filePath = '', int $fileSize = 0, string $errorMessage = '', ?MusicInfo $musicInfo = null)
+    public function __construct(bool $success, string $filePath = '', int $fileSize = 0, string $errorMessage = '', ?MusicInfo $musicInfo = null, ?bool $metadataWritten = null)
     {
         $this->success = $success;
         $this->filePath = $filePath;
         $this->fileSize = $fileSize;
         $this->errorMessage = $errorMessage;
         $this->musicInfo = $musicInfo;
+        $this->metadataWritten = $metadataWritten;
     }
 }
 
@@ -246,7 +249,7 @@ class MusicDownloader
      */
     private function buildFilePath(MusicInfo $info): string
     {
-        $filename = "{$info->artists} - {$info->name}";
+        $filename = "{$info->artists}-{$info->name}-{$info->quality}";
         $safe = $this->sanitizeFilename($filename);
         $ext = $this->determineFileExtension($info->downloadUrl, $info->fileType);
         return $this->downloadDir . DIRECTORY_SEPARATOR . "{$safe}{$ext}";
@@ -257,26 +260,32 @@ class MusicDownloader
      *
      * @param int|string $musicId 音乐ID
      * @param string $quality 音质
+     * @param bool $force 强制重新下载并写入元数据 (忽略已存在文件)
      * @return DownloadResult 下载结果
      */
-    public function downloadMusicFile($musicId, string $quality = 'standard'): DownloadResult
+    public function downloadMusicFile($musicId, string $quality = 'standard', bool $force = false): DownloadResult
     {
         try {
             $musicInfo = $this->getMusicInfo($musicId, $quality);
             $filePath = $this->buildFilePath($musicInfo);
 
-            // 已存在则直接返回
-            if (file_exists($filePath)) {
-                return new DownloadResult(true, $filePath, filesize($filePath), '', $musicInfo);
+            // 已存在且非强制模式则直接返回 (跳过元数据写入)
+            if (!$force && file_exists($filePath)) {
+                return new DownloadResult(true, $filePath, filesize($filePath), '', $musicInfo, null);
+            }
+
+            // 强制模式: 删除已存在文件
+            if ($force && file_exists($filePath)) {
+                @unlink($filePath);
             }
 
             // 流式下载
             $this->downloadFile($musicInfo->downloadUrl, $filePath);
 
             // 写入元数据 (双模式: ffmpeg 优先，不可用降级 getID3；失败不影响主流程)
-            $this->writeMetadata($filePath, $musicInfo);
+            $metadataOk = $this->writeMetadata($filePath, $musicInfo);
 
-            return new DownloadResult(true, $filePath, filesize($filePath), '', $musicInfo);
+            return new DownloadResult(true, $filePath, filesize($filePath), '', $musicInfo, $metadataOk);
 
         } catch (DownloadException $e) {
             throw $e;
@@ -720,6 +729,9 @@ class MusicDownloader
      *
      * 处理: title/artist/album/track + 封面 (如果支持)
      *
+     * 注意: getID3 的 metaflac/vorbiscomment 写入器依赖外部命令行工具，
+     *       因此 FLAC 使用内置的纯 PHP 写入器 (writeFlacMetadataNative)
+     *
      * @param string $filePath 文件路径
      * @param MusicInfo $musicInfo 音乐信息
      * @return bool 是否写入成功
@@ -727,6 +739,11 @@ class MusicDownloader
     private function writeMetadataWithGetid3(string $filePath, MusicInfo $musicInfo): bool
     {
         $fileExt = '.' . strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+
+        // FLAC 使用纯 PHP 写入器 (getID3 的 metaflac 依赖外部工具)
+        if ($fileExt === '.flac') {
+            return $this->writeFlacMetadataNative($filePath, $musicInfo);
+        }
 
         // 检查 getID3 是否支持该格式
         if (!isset(self::$extToTagFormat[$fileExt])) {
@@ -775,7 +792,7 @@ class MusicDownloader
                 $tagData['track_number'] = [(string)$musicInfo->trackNumber];
             }
 
-            // 下载并嵌入封面图片
+            // 下载并嵌入封面图片 (仅 ID3v2 / MP3 支持)
             if ($musicInfo->picUrl) {
                 try {
                     $coverContent = @file_get_contents($musicInfo->picUrl);
@@ -813,6 +830,289 @@ class MusicDownloader
         } catch (Exception $e) {
             error_log("getID3 写入元数据异常: " . $e->getMessage());
             return false;
+        }
+    }
+
+    // ==================== FLAC 纯 PHP 元数据写入 ====================
+
+    /**
+     * 纯 PHP 写入 FLAC 元数据 (VORBIS_COMMENT + PICTURE 块)
+     *
+     * 使用流式 I/O，避免将整个大文件读入内存
+     *
+     * FLAC 文件格式:
+     * - "fLaC" (4 bytes) 文件标识
+     * - metadata 块序列: header(1B) + length(3B BE) + data(NB)
+     *   header: bit7=is_last, bits6-0=block_type
+     *   type: 0=STREAMINFO, 4=VORBIS_COMMENT, 6=PICTURE
+     *
+     * @param string $filePath FLAC 文件路径
+     * @param MusicInfo $musicInfo 音乐信息
+     * @return bool 是否写入成功
+     */
+    private function writeFlacMetadataNative(string $filePath, MusicInfo $musicInfo): bool
+    {
+        // 只读取 metadata 部分到内存（头部几十 KB），音频数据用流式拷贝
+        $source = @fopen($filePath, 'rb');
+        if ($source === false) {
+            error_log("FLAC 写入失败: 无法打开文件 {$filePath}");
+            return false;
+        }
+
+        try {
+            // 读取并验证 fLaC 标识
+            $magic = fread($source, 4);
+            if ($magic !== 'fLaC') {
+                error_log("FLAC 写入失败: 不是有效的 FLAC 文件");
+                return false;
+            }
+
+            // 解析所有 metadata 块，只保留非 VORBIS_COMMENT(4)/PICTURE(6) 块到内存
+            $keptBlocks = []; // ['type' => int, 'data' => string]
+            $audioDataOffset = -1;
+
+            while (!feof($source)) {
+                $headerBytes = fread($source, 4);
+                if (strlen($headerBytes) < 4) {
+                    break;
+                }
+
+                $header = ord($headerBytes[0]);
+                $isLast = ($header & 0x80) !== 0;
+                $blockType = $header & 0x7F;
+                $blockLen = (ord($headerBytes[1]) << 16)
+                          | (ord($headerBytes[2]) << 8)
+                          | ord($headerBytes[3]);
+
+                if ($blockLen > 16 * 1024 * 1024) { // 单块超过 16MB 视为异常
+                    error_log("FLAC 写入失败: metadata 块过大 (type={$blockType}, len={$blockLen})");
+                    return false;
+                }
+
+                $blockData = '';
+                $remaining = $blockLen;
+                while ($remaining > 0 && !feof($source)) {
+                    $chunk = fread($source, min($remaining, 65536));
+                    if ($chunk === false || $chunk === '') {
+                        break;
+                    }
+                    $blockData .= $chunk;
+                    $remaining -= strlen($chunk);
+                }
+
+                if (strlen($blockData) < $blockLen) {
+                    error_log("FLAC 写入失败: 块数据不完整 (type={$blockType})");
+                    return false;
+                }
+
+                // 保留 STREAMINFO(0)/PADDING(1)/APPLICATION(2)/SEEKTABLE(3)/CUESHEET(5)
+                // 移除旧的 VORBIS_COMMENT(4) 和 PICTURE(6)，稍后重新添加
+                if ($blockType !== 4 && $blockType !== 6) {
+                    $keptBlocks[] = ['type' => $blockType, 'data' => $blockData];
+                }
+
+                if ($isLast) {
+                    $audioDataOffset = ftell($source);
+                    break;
+                }
+            }
+
+            if ($audioDataOffset < 0) {
+                error_log("FLAC 写入失败: 未找到最后一个 metadata 块");
+                return false;
+            }
+
+            // 追加新的 VORBIS_COMMENT 块
+            $vorbisCommentData = $this->buildFlacVorbisCommentBlock($musicInfo);
+            $keptBlocks[] = ['type' => 4, 'data' => $vorbisCommentData];
+
+            // 追加新的 PICTURE 块 (如果有封面)
+            $coverContent = $this->downloadCoverContent($musicInfo->picUrl);
+            if ($coverContent !== null) {
+                $pictureBlockData = $this->buildFlacPictureBlock($coverContent);
+                if ($pictureBlockData !== null) {
+                    $keptBlocks[] = ['type' => 6, 'data' => $pictureBlockData];
+                }
+            }
+
+            // 写入临时文件: 先写 fLaC + metadata 块，再流式拷贝音频数据
+            $tmpPath = $filePath . '.tmp_' . bin2hex(random_bytes(4));
+            $dest = @fopen($tmpPath, 'wb');
+            if ($dest === false) {
+                error_log("FLAC 写入失败: 无法创建临时文件 {$tmpPath}");
+                return false;
+            }
+
+            try {
+                // 写入 fLaC 标识
+                fwrite($dest, 'fLaC');
+
+                // 写入所有 metadata 块
+                $blockCount = count($keptBlocks);
+                for ($i = 0; $i < $blockCount; $i++) {
+                    $isLast = ($i === $blockCount - 1);
+                    $type = $keptBlocks[$i]['type'];
+                    $data = $keptBlocks[$i]['data'];
+                    $len = strlen($data);
+
+                    // 1 字节 header
+                    fwrite($dest, chr(($isLast ? 0x80 : 0x00) | $type));
+                    // 3 字节大端长度
+                    fwrite($dest, chr(($len >> 16) & 0xFF));
+                    fwrite($dest, chr(($len >> 8) & 0xFF));
+                    fwrite($dest, chr($len & 0xFF));
+                    // 块数据
+                    fwrite($dest, $data);
+                }
+
+                // 流式拷贝音频数据 (避免大块内存占用)
+                fseek($source, $audioDataOffset);
+                while (!feof($source)) {
+                    $chunk = fread($source, 1024 * 1024); // 1MB 每次
+                    if ($chunk === false || $chunk === '') {
+                        break;
+                    }
+                    fwrite($dest, $chunk);
+                }
+            } finally {
+                fclose($dest);
+            }
+
+        } finally {
+            fclose($source);
+        }
+
+        // 替换原文件
+        @unlink($filePath);
+        if (!@rename($tmpPath, $filePath)) {
+            if (!@copy($tmpPath, $filePath)) {
+                error_log("FLAC 写入失败: 无法替换原文件 {$filePath}");
+                @unlink($tmpPath);
+                return false;
+            }
+            @unlink($tmpPath);
+        }
+
+        return true;
+    }
+
+    /**
+     * 构建 FLAC VORBIS_COMMENT 块数据
+     *
+     * 格式 (小端序):
+     * - 4B vendor string length (LE)
+     * - NB vendor string
+     * - 4B comment count (LE)
+     * - 每个: 4B length (LE) + NB "KEY=VALUE"
+     *
+     * @param MusicInfo $info 音乐信息
+     * @return string 块数据
+     */
+    private function buildFlacVorbisCommentBlock(MusicInfo $info): string
+    {
+        $comments = [];
+        if ($info->name) {
+            $comments[] = 'TITLE=' . $info->name;
+        }
+        if ($info->artists) {
+            $comments[] = 'ARTIST=' . $info->artists;
+            $comments[] = 'ALBUMARTIST=' . $info->artists;
+        }
+        if ($info->album) {
+            $comments[] = 'ALBUM=' . $info->album;
+        }
+        $comments[] = 'COMMENT=Downloaded from Netease Cloud Music';
+        if ($info->trackNumber > 0) {
+            $comments[] = 'TRACKNUMBER=' . (string)$info->trackNumber;
+        }
+
+        $data = '';
+        // vendor string
+        $vendor = 'Netease Cloud Music PHP Downloader';
+        $data .= pack('V', strlen($vendor)); // little-endian 32-bit
+        $data .= $vendor;
+        // comment count
+        $data .= pack('V', count($comments));
+        // each comment
+        foreach ($comments as $comment) {
+            $data .= pack('V', strlen($comment));
+            $data .= $comment;
+        }
+
+        return $data;
+    }
+
+    /**
+     * 构建 FLAC PICTURE 块数据
+     *
+     * 格式 (大端序):
+     * - 4B picture type (3=Cover front)
+     * - 4B MIME length + MIME string
+     * - 4B description length + description string
+     * - 4B width, 4B height, 4B color depth, 4B colors
+     * - 4B picture data length + picture data
+     *
+     * @param string $coverData 封面二进制数据
+     * @return string|null 块数据
+     */
+    private function buildFlacPictureBlock(string $coverData): ?string
+    {
+        if (empty($coverData)) {
+            return null;
+        }
+
+        // 检测图片 MIME 类型
+        $mime = 'image/jpeg';
+        if (function_exists('exif_imagetype')) {
+            $tmpProbe = tempnam($this->downloadDir, 'probe_');
+            if ($tmpProbe !== false) {
+                file_put_contents($tmpProbe, $coverData);
+                $imageType = @exif_imagetype($tmpProbe);
+                @unlink($tmpProbe);
+                if ($imageType !== false) {
+                    $mime = image_type_to_mime_type($imageType);
+                }
+            }
+        }
+
+        $data = '';
+        $data .= pack('N', 3); // picture type: Cover (front) - big-endian
+        $data .= pack('N', strlen($mime)); // MIME length
+        $data .= $mime;
+        $desc = 'Album cover';
+        $data .= pack('N', strlen($desc)); // description length
+        $data .= $desc;
+        $data .= pack('N', 0); // width (unknown)
+        $data .= pack('N', 0); // height (unknown)
+        $data .= pack('N', 0); // color depth (unknown)
+        $data .= pack('N', 0); // number of colors (unknown)
+        $data .= pack('N', strlen($coverData)); // picture data length
+        $data .= $coverData;
+
+        return $data;
+    }
+
+    /**
+     * 下载封面图片并返回二进制内容
+     *
+     * @param string $picUrl 封面 URL
+     * @return string|null 封面二进制数据
+     */
+    private function downloadCoverContent(string $picUrl): ?string
+    {
+        if (empty($picUrl)) {
+            return null;
+        }
+
+        try {
+            $content = @file_get_contents($picUrl);
+            if ($content === false || $content === '') {
+                return null;
+            }
+            return $content;
+        } catch (Exception $e) {
+            error_log("封面下载失败: " . $e->getMessage());
+            return null;
         }
     }
 }

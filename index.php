@@ -614,6 +614,7 @@ function handleDownloadMusic(MusicAPIService $service): void
     $musicId = $data['id'] ?? null;
     $quality = $data['quality'] ?? 'lossless';
     $returnFormat = $data['format'] ?? 'file';
+    $force = !empty($data['force']); // 强制重新下载并写入元数据
 
     // 参数验证
     $error = $service->validateParams(['music_id' => $musicId]);
@@ -666,27 +667,34 @@ function handleDownloadMusic(MusicAPIService $service): void
         'download_url' => $urlData['url'],
     ];
 
-    // 生成安全文件名
-    $safeName = $musicInfo['name'] . ' [' . $quality . ']';
+    // 生成安全文件名: 歌手-歌名-音质.格式 (与 music_downloader.php 的 buildFilePath 保持一致)
+    $artistStr = implode('/', array_map(function($a) {
+        return $a['name'];
+    }, $songData['ar'] ?? [])) ?: '未知艺术家';
+    $safeName = $artistStr . '-' . $musicInfo['name'] . '-' . $quality;
     $safeName = preg_replace('/[<>:"\/\\\\|?*]/', '_', $safeName);
     $filename = $safeName . '.' . $musicInfo['file_type'];
     $filePath = DOWNLOADS_DIR . DIRECTORY_SEPARATOR . $filename;
 
-    // 检查文件是否已存在
-    if (!file_exists($filePath)) {
-        // 使用下载器下载
-        $downloadResult = $service->getDownloader()->downloadMusicFile($musicId, $quality);
-        if (!$downloadResult->success) {
-            APIResponse::error("下载失败: " . $downloadResult->errorMessage, 500);
-        }
-        $filePath = $downloadResult->filePath;
-        error_log("下载完成: {$filename}");
-    } else {
-        error_log("文件已存在: {$filename}");
+    // 调用下载器 (force 参数控制是否强制重新下载+写入元数据)
+    $downloadResult = $service->getDownloader()->downloadMusicFile($musicId, $quality, $force);
+    if (!$downloadResult->success) {
+        APIResponse::error("下载失败: " . $downloadResult->errorMessage, 500);
     }
+    $filePath = $downloadResult->filePath;
+    $metadataWritten = $downloadResult->metadataWritten;
+    error_log("下载完成: {$filename} (元数据写入: " . var_export($metadataWritten, true) . ")");
 
     // 根据返回格式返回结果
     if ($returnFormat === 'json') {
+        // 元数据写入状态描述
+        $metadataStatus = 'skipped (文件已存在)';
+        if ($metadataWritten === true) {
+            $metadataStatus = 'success';
+        } elseif ($metadataWritten === false) {
+            $metadataStatus = 'failed (查看服务器错误日志)';
+        }
+
         APIResponse::success([
             'music_id' => $musicId,
             'name' => $musicInfo['name'],
@@ -700,6 +708,8 @@ function handleDownloadMusic(MusicAPIService $service): void
             'file_path' => realpath($filePath),
             'filename' => $filename,
             'duration' => $musicInfo['duration'],
+            'metadata_written' => $metadataWritten,
+            'metadata_status' => $metadataStatus,
         ], '下载完成');
 
     } else {
