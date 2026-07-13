@@ -311,6 +311,7 @@ try {
                 'cookie_status' => $cookieStatus,
                 'cookie_count' => count($cookies),
                 'downloads_dir' => realpath(DOWNLOADS_DIR) ?: DOWNLOADS_DIR,
+                'downloads_retention_days' => (int)DOWNLOAD_RETENTION_DAYS,
                 'metadata' => $service->getDownloader()->getMetadataEngine(),
                 'version' => '2.0.0-php',
             ], 'API服务运行正常');

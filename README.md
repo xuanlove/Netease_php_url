@@ -580,6 +580,7 @@ https://163cn.tv/xxxxx
 | `DOWNLOADS_DIR` | `./downloads` | 下载目录 |
 | `COOKIE_FILE` | `./cookie.txt` | Cookie 文件路径 |
 | `MAX_FILE_SIZE` | `500MB` | 最大文件大小限制 |
+| `DOWNLOAD_RETENTION_DAYS` | `0` | 下载文件保留天数，超过 N 天自动清理（0 = 不清理） |
 | `CORS_ORIGINS` | `*` | CORS 跨域来源 |
 | `FFMPEG_PATH` | 环境变量 | ffmpeg 路径，留空自动检测；不可用降级 getID3 |
 | `QUALITY_LEVELS` | 8 种音质 | 支持的音质等级列表 |

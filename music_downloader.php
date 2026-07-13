@@ -122,6 +122,9 @@ class MusicDownloader
     /** @var string|null ffmpeg 可执行文件路径 (运行期解析，null 表示不可用) */
     private $ffmpegPath;
 
+    /** @var int 下载文件保留天数 (0 = 不清理) */
+    private $retentionDays;
+
     /**
      * @param string $downloadDir 下载目录
      * @param int $maxConcurrent 最大并发下载数
@@ -135,6 +138,60 @@ class MusicDownloader
         $this->maxConcurrent = $maxConcurrent;
         $this->api = new MusicAPI();
         $this->ffmpegPath = $this->resolveFfmpeg();
+        $this->retentionDays = defined('DOWNLOAD_RETENTION_DAYS') ? (int)DOWNLOAD_RETENTION_DAYS : 0;
+
+        // 启动时清理过期文件 (懒清理，无需 cron)
+        $this->cleanExpiredDownloads();
+    }
+
+    /**
+     * 清理过期下载文件
+     *
+     * 删除 download 目录下修改时间超过 DOWNLOAD_RETENTION_DAYS 天的音频文件
+     * retentionDays 为 0 时不执行清理
+     *
+     * @return int 清理的文件数量
+     */
+    public function cleanExpiredDownloads(): int
+    {
+        if ($this->retentionDays <= 0) {
+            return 0;
+        }
+
+        if (!is_dir($this->downloadDir)) {
+            return 0;
+        }
+
+        $cleaned = 0;
+        $cutoff = time() - ($this->retentionDays * 86400);
+        $audioExts = ['mp3', 'flac', 'm4a', 'mp4', 'ogg', 'opus', 'eac3'];
+
+        try {
+            $iterator = new DirectoryIterator($this->downloadDir);
+            foreach ($iterator as $file) {
+                if ($file->isDot() || !$file->isFile()) {
+                    continue;
+                }
+                $ext = strtolower($file->getExtension());
+                if (!in_array($ext, $audioExts)) {
+                    continue;
+                }
+                // 按文件修改时间判断
+                if ($file->getMTime() < $cutoff) {
+                    if (@unlink($file->getPathname())) {
+                        $cleaned++;
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            error_log("清理过期下载文件异常: " . $e->getMessage());
+        }
+
+        if ($cleaned > 0) {
+            error_log("已清理 {$cleaned} 个过期下载文件 (保留期: {$this->retentionDays} 天)");
+        }
+
+        return $cleaned;
     }
 
     /**

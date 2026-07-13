@@ -16,6 +16,9 @@ define('TEMPLATES_DIR', __DIR__ . '/templates');
 // 文件大小限制 (500MB)
 define('MAX_FILE_SIZE', 500 * 1024 * 1024);
 
+// 下载文件保留天数: 超过 N 天的下载文件将被自动清理 (0 = 不清理)
+define('DOWNLOAD_RETENTION_DAYS', 0);
+
 // CORS 配置
 define('CORS_ORIGINS', '*');
 
