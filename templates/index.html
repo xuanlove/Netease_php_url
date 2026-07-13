@@ -55,6 +55,9 @@
                         </div>
                     </div>
                     <div id="parse-area" style="display:none;">
+                        <div id="ffmpeg-warning-parse" class="alert alert-warning d-none mb-3 py-2" style="font-size:0.9rem;">
+                            <strong>⚠ 未检测到 ffmpeg</strong> — 下载音乐将没有封面/元数据。<a href="https://ffmpeg.org/download.html" target="_blank" class="alert-link">安装 ffmpeg</a>
+                        </div>
                         <div class="mb-3">
                             <label for="song_ids" class="form-label">歌曲ID或URL</label>
                             <input type="text" id="song_ids" class="form-control" placeholder="输入歌曲ID或URL">
@@ -95,6 +98,9 @@
                         </div>
                     </div>
                     <div id="download-area" style="display:none;">
+                        <div id="ffmpeg-warning-download" class="alert alert-warning d-none mb-3 py-2" style="font-size:0.9rem;">
+                            <strong>⚠ 未检测到 ffmpeg</strong> — 下载音乐将没有封面/元数据。<a href="https://ffmpeg.org/download.html" target="_blank" class="alert-link">安装 ffmpeg</a>
+                        </div>
                         <div class="mb-3">
                             <label for="download_id" class="form-label">音乐ID或URL</label>
                             <input type="text" id="download_id" class="form-control" placeholder="输入音乐ID或网易云音乐链接">
@@ -234,6 +240,17 @@
     <script src="https://mirrors.sustech.edu.cn/cdnjs/ajax/libs/twitter-bootstrap/5.1.3/js/bootstrap.bundle.min.js"></script>
     <script>
         $(document).ready(function() {
+            // 页面加载时检测 ffmpeg
+            $.get('/health', function(data) {
+                const ffmpeg = (data.data || {}).ffmpeg || {};
+                if (!ffmpeg.available) {
+                    $('#ffmpeg-warning-parse').removeClass('d-none');
+                    $('#ffmpeg-warning-download').removeClass('d-none');
+                }
+            }).fail(function() {
+                // 检测失败不阻断功能
+            });
+
             // 清理文件名中的非法字符
             function sanitizeFilename(name) {
                 return String(name || '').replace(/[<>:"\/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim() || '未知';

@@ -224,6 +224,29 @@ class MusicDownloader
     }
 
     /**
+     * 检测 ffmpeg 是否可用
+     *
+     * @return array{available: bool, path: string|null, version: string|null}
+     */
+    public function detectFfmpeg(): array
+    {
+        $path = $this->resolveFfmpeg();
+        if (!$path) {
+            return ['available' => false, 'path' => null, 'version' => null];
+        }
+
+        // 尝试获取版本信息
+        $version = null;
+        $cmd = escapeshellarg($path) . ' -version';
+        $output = @shell_exec($cmd . ' 2>&1');
+        if ($output && preg_match('/ffmpeg version\s+([^\s]+)/i', $output, $m)) {
+            $version = $m[1];
+        }
+
+        return ['available' => true, 'path' => $path, 'version' => $version];
+    }
+
+    /**
      * 获取音乐详细信息
      *
      * @param int|string $musicId 音乐ID
