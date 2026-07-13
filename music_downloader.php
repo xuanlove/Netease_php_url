@@ -437,9 +437,16 @@ class MusicDownloader
      */
     private function writeMetadata(string $filePath, MusicInfo $musicInfo): bool
     {
+        $fileExt = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+        $hasLyrics = !empty($musicInfo->lyric);
+
         // 1. 优先尝试 ffmpeg
         if ($this->ffmpegPath !== null) {
             if ($this->writeMetadataWithFfmpeg($filePath, $musicInfo)) {
+                // ffmpeg 不支持 MP3 的 USLT 歌词帧，MP3 需要追加 getID3 写入歌词
+                if ($fileExt === 'mp3' && $hasLyrics) {
+                    $this->writeLyricsWithGetid3($filePath, $musicInfo);
+                }
                 return true;
             }
             error_log("ffmpeg 元数据写入失败，降级到 getID3");
@@ -583,7 +590,11 @@ class MusicDownloader
         $coverPath = $this->downloadCoverToTemp($musicInfo->picUrl);
 
         try {
-            $tmpOutput = $filePath . '.tmp_' . bin2hex(random_bytes(4));
+            // 临时文件名需保留原扩展名，否则 ffmpeg 无法推断输出格式
+            $pathInfo = pathinfo($filePath);
+            $tmpOutput = $pathInfo['dirname'] . DIRECTORY_SEPARATOR
+                . $pathInfo['filename'] . '.tmp_' . bin2hex(random_bytes(4))
+                . '.' . $pathInfo['extension'];
             $cmd = $this->buildFfmpegCommand($filePath, $tmpOutput, $musicInfo, $coverPath);
 
             $output = [];
@@ -709,6 +720,11 @@ class MusicDownloader
         }
         $parts[] = '-metadata comment=' . escapeshellarg('Downloaded from Netease Cloud Music');
 
+        // FLAC 歌词 (ffmpeg 支持写入 vorbiscomment 字段; MP3 的 USLT 帧由 getID3 补写)
+        if ($ext === 'flac' && $info->lyric) {
+            $parts[] = '-metadata lyrics=' . escapeshellarg($info->lyric);
+        }
+
         // 封面流元数据
         if ($coverPath !== null) {
             $parts[] = '-metadata:s:v title=' . escapeshellarg('Album cover');
@@ -792,6 +808,27 @@ class MusicDownloader
                 $tagData['track_number'] = [(string)$musicInfo->trackNumber];
             }
 
+            // 写入歌词 (USLT 帧 - 不带时间戳歌词)
+            // 必须使用长名 'unsynchronised_lyric' 作为 key，
+            // 因为 ID3v2ShortFrameNameLookup 会将 key 转小写后查表，只有长名能映射到 'USLT' 帧名
+            if ($musicInfo->lyric) {
+                $tagData['unsynchronised_lyric'][0] = [
+                    'language'   => 'chi',
+                    'description' => '',
+                    'data'       => $musicInfo->lyric,
+                    'encodingid' => 1, // UTF-16 with BOM (ID3v2.3 兼容)
+                ];
+                // 翻译歌词作为第二个 USLT 帧 (description 必须不同)
+                if ($musicInfo->tlyric) {
+                    $tagData['unsynchronised_lyric'][1] = [
+                        'language'   => 'chi',
+                        'description' => '翻译',
+                        'data'       => $musicInfo->tlyric,
+                        'encodingid' => 1,
+                    ];
+                }
+            }
+
             // 下载并嵌入封面图片 (仅 ID3v2 / MP3 支持)
             if ($musicInfo->picUrl) {
                 try {
@@ -829,6 +866,119 @@ class MusicDownloader
 
         } catch (Exception $e) {
             error_log("getID3 写入元数据异常: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 使用 getID3 补写歌词 (USLT 帧) 到已有 MP3
+     *
+     * 用于 ffmpeg 写入 MP3 元数据后补写歌词，因为 ffmpeg 不支持 ID3v2 USLT 帧。
+     * 实现: 读取已有 ID3v2 标签 → 追加 USLT 帧 → 整体写回
+     * (不能用 overwrite_tags=false，因为 getID3 的 MergeExistingTagData 在该模式下会抛异常)
+     *
+     * @param string $filePath 文件路径
+     * @param MusicInfo $musicInfo 音乐信息
+     * @return bool 是否写入成功
+     */
+    private function writeLyricsWithGetid3(string $filePath, MusicInfo $musicInfo): bool
+    {
+        if (empty($musicInfo->lyric)) {
+            return false;
+        }
+
+        $getid3Path = __DIR__ . '/libs/getid3/getid3/getid3.php';
+        if (!file_exists($getid3Path)) {
+            error_log("补写歌词失败: getID3 库不存在");
+            return false;
+        }
+
+        require_once $getid3Path;
+        require_once __DIR__ . '/libs/getid3/getid3/write.php';
+
+        try {
+            // 1. 读取已有 ID3v2 标签 (ffmpeg 写入的 title/artist/album 等)
+            // 只保留简单文本帧，跳过结构化帧 (TXXX/APIC/COMM 等) 以避免数据结构不兼容
+            $tagData = [];
+            $getID3 = new getID3;
+            $existingInfo = $getID3->analyze($filePath);
+            // 简单文本帧白名单 (这些帧的数据是字符串数组，可直接传给 getID3)
+            $simpleTextFrames = [
+                'title', 'artist', 'album', 'album_artist', 'albumartist',
+                'band', 'composer', 'genre', 'year', 'track_number', 'tracknumber',
+                'track', 'comment', 'encoder', 'encoder_settings',
+                'copyright', 'publisher', 'language', 'isrc',
+            ];
+            if (!empty($existingInfo['tags']['id3v2'])) {
+                foreach ($existingInfo['tags']['id3v2'] as $key => $values) {
+                    $lowerKey = strtolower($key);
+                    // 跳过已有的 USLT/SLT 帧，用新的替换
+                    if ($lowerKey === 'unsynchronised_lyric' || $lowerKey === 'uslt' || $lowerKey === 'synchronised_lyric' || $lowerKey === 'sylt') {
+                        continue;
+                    }
+                    // 跳过 APIC (封面)，由 ffmpeg 已写入
+                    if ($lowerKey === 'attached_picture' || $lowerKey === 'apic') {
+                        continue;
+                    }
+                    // 跳过 TXXX 等结构化帧 (数据结构不兼容，会导致 FormatDataForID3v2 失败)
+                    if ($lowerKey === 'txxx' || $lowerKey === 'text' || $lowerKey === 'wxxx' || $lowerKey === 'url') {
+                        continue;
+                    }
+                    // 跳过 COMM (评论)，结构化帧
+                    if ($lowerKey === 'comment' || $lowerKey === 'comm') {
+                        // comment 可能是简单字符串也可能是结构化，检查数据格式
+                        if (isset($values[0]) && is_array($values[0])) {
+                            continue; // 结构化数据，跳过
+                        }
+                    }
+                    // 只保留白名单中的简单文本帧
+                    if (!in_array($lowerKey, $simpleTextFrames)) {
+                        continue;
+                    }
+                    $tagData[strtoupper($key)] = $values;
+                }
+            }
+
+            // 2. 追加 USLT 帧 (使用长名 'unsynchronised_lyric' 作为 key)
+            $tagData['unsynchronised_lyric'] = [
+                [
+                    'language'   => 'chi',
+                    'description' => '',
+                    'data'       => $musicInfo->lyric,
+                    'encodingid' => 1, // UTF-16 with BOM (ID3v2.3 兼容)
+                ],
+            ];
+
+            // 翻译歌词作为第二个 USLT 帧 (description 必须不同)
+            if ($musicInfo->tlyric) {
+                $tagData['unsynchronised_lyric'][1] = [
+                    'language'   => 'chi',
+                    'description' => '翻译',
+                    'data'       => $musicInfo->tlyric,
+                    'encodingid' => 1,
+                ];
+            }
+
+            // 3. 整体写回
+            $tagwriter = new getid3_writetags;
+            $tagwriter->filename = $filePath;
+            $tagwriter->tagformats = ['id3v2.3'];
+            $tagwriter->overwrite_tags = true;
+            $tagwriter->remove_other_tags = false;
+            $tagwriter->tag_encoding = 'UTF-8';
+            $tagwriter->tag_data = $tagData;
+
+            if ($tagwriter->WriteTags()) {
+                if (!empty($tagwriter->warnings)) {
+                    error_log("getID3 补写歌词警告: " . implode('; ', $tagwriter->warnings));
+                }
+                return true;
+            }
+
+            error_log("getID3 补写歌词失败: " . implode('; ', $tagwriter->errors));
+            return false;
+        } catch (Exception $e) {
+            error_log("getID3 补写歌词异常: " . $e->getMessage());
             return false;
         }
     }
@@ -1024,6 +1174,15 @@ class MusicDownloader
         $comments[] = 'COMMENT=Downloaded from Netease Cloud Music';
         if ($info->trackNumber > 0) {
             $comments[] = 'TRACKNUMBER=' . (string)$info->trackNumber;
+        }
+        // 写入歌词 (LRC 格式，含时间戳)
+        if ($info->lyric) {
+            $comments[] = 'LYRICS=' . $info->lyric;
+            $comments[] = 'UNSYNCEDLYRICS=' . $info->lyric;
+        }
+        // 翻译歌词
+        if ($info->tlyric) {
+            $comments[] = 'TRANSLATEDLYRICS=' . $info->tlyric;
         }
 
         $data = '';

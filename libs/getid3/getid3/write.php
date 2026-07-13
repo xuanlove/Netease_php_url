@@ -584,18 +584,39 @@ class getid3_writetags
 			$ID3v2_framename = getid3_write_id3v2::ID3v2ShortFrameNameLookup($id3v2_majorversion, $tag_key);
 			switch ($ID3v2_framename) {
 				case 'APIC':
-					foreach ($valuearray as $key => $apic_data_array) {
-						if (isset($apic_data_array['data']) &&
-							isset($apic_data_array['picturetypeid']) &&
-							isset($apic_data_array['description']) &&
-							isset($apic_data_array['mime'])) {
-								$tag_data_id3v2['APIC'][] = $apic_data_array;
-						} else {
-							$this->errors[] = 'ID3v2 APIC data is not properly structured';
-							return false;
-						}
+				foreach ($valuearray as $key => $apic_data_array) {
+					if (isset($apic_data_array['data']) &&
+						isset($apic_data_array['picturetypeid']) &&
+						isset($apic_data_array['description']) &&
+						isset($apic_data_array['mime'])) {
+							$tag_data_id3v2['APIC'][] = $apic_data_array;
+					} else {
+						$this->errors[] = 'ID3v2 APIC data is not properly structured';
+						return false;
 					}
-					break;
+				}
+				break;
+
+			case 'USLT':
+				// Unsynchronised lyrics/text transcription - structured frame like APIC
+				foreach ($valuearray as $key => $uslt_data_array) {
+					if (isset($uslt_data_array['data']) &&
+						isset($uslt_data_array['language']) &&
+						isset($uslt_data_array['description'])) {
+							$uslt_data_array['encodingid'] = isset($uslt_data_array['encodingid']) ? $uslt_data_array['encodingid'] : 1;
+							// Convert data and description to match encodingid (similar to default case behavior)
+							if ($uslt_data_array['encodingid'] == 1) {
+								// UTF-16 with BOM - convert from source encoding (tag_encoding) to UTF-16LE + BOM
+								$uslt_data_array['data']       = "\xFF\xFE".getid3_lib::iconv_fallback($this->tag_encoding, 'UTF-16LE', $uslt_data_array['data']);
+								$uslt_data_array['description'] = "\xFF\xFE".getid3_lib::iconv_fallback($this->tag_encoding, 'UTF-16LE', $uslt_data_array['description']);
+							}
+							$tag_data_id3v2['USLT'][] = $uslt_data_array;
+					} else {
+						$this->errors[] = 'ID3v2 USLT data is not properly structured (need data, language, description)';
+						return false;
+					}
+				}
+				break;
 
 				case 'POPM':
 					if (isset($valuearray['email']) &&

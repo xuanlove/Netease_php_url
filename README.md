@@ -4,7 +4,7 @@
 
 **功能强大的网易云音乐解析工具 - PHP 版**
 
-支持歌曲搜索 · 单曲解析 · 歌单解析 · 专辑解析 · 音乐下载 · 扫码登录
+支持歌曲搜索 · 单曲解析 · 歌单解析 · 专辑解析 · 音乐下载（含元数据与歌词写入） · 扫码登录
 
 [功能特性](#-功能特性) ·
 [快速开始](#-快速开始) ·
@@ -20,7 +20,7 @@
 
 基于 [Suxiaoqinx/Netease_url](https://github.com/Suxiaoqinx/Netease_url) Python 项目的 PHP 移植版本，提供完整的网易云音乐解析与下载服务。
 
-纯 PHP 实现，无依赖框架，支持 PHP 内置服务器、Apache、Nginx 三种部署方式。
+纯 PHP 实现，无依赖框架，支持 PHP 内置服务器、Apache、Nginx 三种部署方式。下载时自动写入 ID3/VorbisComment 元数据、专辑封面与歌词（LRC），无需外部工具即可工作。
 
 ## ✨ 功能特性
 
@@ -28,12 +28,13 @@
 
 | 功能 | 说明 |
 |---|---|
-| 🔍 **歌曲搜索** | 关键词搜索网易云音乐库 |
-| 🎧 **单曲解析** | 解析单首歌曲的详细信息与播放链接 |
+| 🔍 **歌曲搜索** | 关键词搜索网易云音乐库，支持设置返回数量 |
+| 🎧 **单曲解析** | 解析单首歌曲的详细信息、播放链接、歌词 |
 | 📋 **歌单解析** | 批量解析歌单中所有歌曲 |
 | 💿 **专辑解析** | 批量解析专辑中所有歌曲 |
-| ⬇️ **音乐下载** | 多音质下载，双模式写入元数据 (ffmpeg 优先，降级 getID3) |
+| ⬇️ **音乐下载** | 多音质下载，自动写入元数据 + 封面 + 歌词 |
 | 📱 **扫码登录** | 二维码扫码自动获取 Cookie |
+| 🎤 **歌词写入** | MP3 写入 USLT 帧，FLAC 写入 LYRICS/UNSYNCEDLYRICS 字段 |
 
 ### 🎼 音质支持
 
@@ -47,6 +48,23 @@
 | `sky` | 沉浸环绕声 | - | 黑胶 SVIP |
 | `jymaster` | 超清母带 | - | 黑胶 SVIP |
 | `dolby` | 杜比全景声 | EAC3 | 黑胶 SVIP |
+
+### 📝 元数据与歌词写入
+
+下载时自动写入以下信息（无需手动操作）：
+
+| 字段 | MP3 (ID3v2.3) | FLAC (VorbisComment) |
+|---|---|---|
+| 标题 | `TIT2` | `TITLE` |
+| 艺术家 | `TPE1` / `TPE2` | `ARTIST` / `ALBUMARTIST` |
+| 专辑 | `TALB` | `ALBUM` |
+| 音轨号 | `TRCK` | `TRACKNUMBER` |
+| 备注 | `COMM` | `COMMENT` |
+| 封面 | `APIC` | `PICTURE` 块 |
+| 歌词（原文） | `USLT` (UTF-16) | `LYRICS` + `UNSYNCEDLYRICS` |
+| 歌词（翻译） | `USLT` (description=翻译) | `TRANSLATEDLYRICS` |
+
+歌词为网易云返回的 LRC 格式文本，包含时间戳。
 
 ## 🚀 快速开始
 
@@ -163,9 +181,9 @@ docker run -d -p 5000:80 --name netease netease-php
 ```
 Netease_php_url/
 ├── index.php              # 主入口，路由分发与 API 处理
-├── config.php             # 配置文件（API 地址、密钥、音质）
-├── music_api.php          # API 类（加密、HTTP、搜索、歌曲、歌单、专辑、歌词、二维码）
-├── music_downloader.php   # 下载器类（同步下载、双模式元数据写入）
+├── config.php             # 配置文件（API 地址、密钥、音质、ffmpeg 路径）
+├── music_api.php          # API 类（EAPI 加密、HTTP、搜索、歌曲、歌单、专辑、歌词、二维码）
+├── music_downloader.php   # 下载器类（同步下载、双模式元数据写入、歌词写入）
 ├── qr_login.php           # 二维码登录 CLI 工具
 ├── cookie.txt             # Cookie 配置文件
 ├── .htaccess              # Apache 重写与敏感文件保护
@@ -173,8 +191,7 @@ Netease_php_url/
 ├── templates/
 │   └── index.html         # Web 操作界面
 ├── libs/getid3/           # getID3 纯 PHP 库（元数据写入，无需 ffmpeg）
-└── downloads/             # 下载文件目录（自动创建）
-    └── .htaccess          # 禁止直接访问
+└── downloads/             # 下载文件目录（自动创建，禁止直接访问）
 ```
 
 ## 🌐 Web 界面使用
@@ -189,7 +206,8 @@ Netease_php_url/
 1. 功能选择：**单曲解析**
 2. 输入歌曲 ID 或链接
 3. 选择音质，点击 **解析**
-4. 查看歌曲信息、歌词、在线试听
+4. 查看歌曲信息、歌词、在线试听（APlayer 播放器）
+5. 点击 **点击下载** 直接下载（自动重命名为 `歌手-歌名-音质.格式`）
 
 ### 📋 歌单 / 专辑解析
 1. 功能选择：**歌单解析** 或 **专辑解析**
@@ -201,7 +219,7 @@ Netease_php_url/
 1. 功能选择：**音乐下载**
 2. 输入音乐 ID 或链接
 3. 选择音质，点击 **下载音乐**
-4. 文件自动下载到本地
+4. 文件自动下载到本地（含元数据、封面、歌词）
 
 ### 📱 扫码登录
 1. 功能选择：**扫码登录**
@@ -264,6 +282,13 @@ curl http://localhost:5000/health
     "timestamp": 1783907849,
     "cookie_status": "valid",
     "cookie_count": 3,
+    "downloads_dir": "/var/www/Netease_php_url/downloads",
+    "metadata": {
+      "engine": "getID3",
+      "fallback": null,
+      "ffmpeg": { "available": false, "path": null, "version": null },
+      "getid3": { "available": true }
+    },
     "version": "2.0.0-php"
   }
 }
@@ -409,6 +434,7 @@ POST /download
 | id | string | ✅ | - | 音乐 ID 或链接 |
 | quality | string | ❌ | `lossless` | 音质等级 |
 | format | string | ❌ | `file` | 返回格式：`file` / `json` |
+| force | int | ❌ | `0` | 1 = 强制重新下载并写入元数据 |
 
 ```bash
 # 直接下载文件
@@ -416,9 +442,13 @@ curl -X POST http://localhost:5000/download \
   -d "id=185668&quality=lossless" \
   -o "song.flac"
 
-# 仅获取文件信息（不下载）
+# 仅获取文件信息（不下载实际文件）
 curl -X POST http://localhost:5000/download \
   -d "id=185668&quality=lossless&format=json"
+
+# 强制重新下载并写入元数据（忽略已存在文件）
+curl -X POST http://localhost:5000/download \
+  -d "id=185668&quality=lossless&force=1"
 ```
 
 <details>
@@ -430,7 +460,9 @@ curl -X POST http://localhost:5000/download \
 - `X-Download-Filename: URL 编码的文件名`
 - `X-Download-Message: Download completed successfully`
 
-**format=json**：返回文件元数据，不下载实际文件。
+**format=json**：返回文件元数据，包含 `metadata_written`（true=成功 / false=失败 / null=跳过）和 `metadata_status` 字段。
+
+**force 参数**：默认情况下，已存在的文件会直接返回（跳过元数据写入）。设置 `force=1` 会删除已存在文件并重新下载+写入元数据。
 </details>
 
 ---
@@ -550,6 +582,59 @@ https://163cn.tv/xxxxx
 | `MAX_FILE_SIZE` | `500MB` | 最大文件大小限制 |
 | `CORS_ORIGINS` | `*` | CORS 跨域来源 |
 | `FFMPEG_PATH` | 环境变量 | ffmpeg 路径，留空自动检测；不可用降级 getID3 |
+| `QUALITY_LEVELS` | 8 种音质 | 支持的音质等级列表 |
+
+## 🎵 元数据写入（双模式：ffmpeg 优先，降级 getID3）
+
+本程序采用 **双模式架构** 写入音频元数据/封面/歌词，确保在各种环境都能正常工作：
+
+| 模式 | 引擎 | 说明 | 支持格式 |
+|---|---|---|---|
+| **主模式** | ffmpeg | 命令行工具，支持全格式 | MP3/FLAC/M4A/MP4/OGG/Opus |
+| **降级模式** | getID3 | 纯 PHP 库，无需外部依赖 | MP3/FLAC/OGG/Opus |
+
+**工作流程**：
+1. 启动时检测 ffmpeg（优先 `FFMPEG_PATH` 常量/环境变量，其次 PATH 查找）
+2. 下载完成后优先调用 ffmpeg 写入元数据
+3. ffmpeg 不可用或写入失败时，自动降级到 getID3 纯 PHP 库
+4. 前端在单曲解析和音乐下载界面实时显示当前使用的引擎
+
+**ffmpeg 模式的歌词处理**：
+- FLAC：直接通过 `-metadata lyrics=` 写入
+- MP3：ffmpeg 不支持 USLT 帧，写入后调用 getID3 补写歌词
+
+**getID3 模式的歌词处理**：
+- MP3：使用 ID3v2.3 USLT 帧（UTF-16 with BOM 编码）
+- FLAC：使用 VORBIS_COMMENT 的 `LYRICS` + `UNSYNCEDLYRICS` + `TRANSLATEDLYRICS` 字段
+- FLAC 写入使用纯 PHP 实现（流式 I/O），不依赖 getID3 的 metaflac 外部工具
+
+**安装 ffmpeg（可选，获得最佳兼容性）**：
+
+```bash
+# Ubuntu / Debian
+sudo apt install ffmpeg
+
+# CentOS / RHEL (需 EPEL)
+sudo yum install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Windows
+# 下载 https://ffmpeg.org/download.html 并添加到 PATH
+```
+
+**指定 ffmpeg 路径**（环境变量，可选）：
+
+```bash
+# Linux / macOS
+export FFMPEG_PATH=/usr/local/bin/ffmpeg
+
+# Windows
+set FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
+```
+
+> 即使不安装 ffmpeg，程序也会自动使用内置的 getID3 纯 PHP 库写入元数据和歌词，无需任何额外配置。
 
 ## 🔒 安全防护
 
@@ -584,59 +669,6 @@ https://163cn.tv/xxxxx
 define('CORS_ORIGINS', 'https://yourdomain.com');
 ```
 
-## 🎵 元数据写入（双模式：ffmpeg 优先，降级 getID3）
-
-本程序采用 **双模式架构** 写入音频元数据/封面，确保在各种环境都能正常工作：
-
-| 模式 | 引擎 | 说明 | 支持格式 |
-|---|---|---|---|
-| **主模式** | ffmpeg | 命令行工具，支持全格式 | MP3/FLAC/M4A/MP4/OGG/Opus |
-| **降级模式** | getID3 | 纯 PHP 库，无需外部依赖 | MP3/FLAC/OGG/Opus |
-
-**工作流程**：
-1. 启动时检测 ffmpeg（优先 `FFMPEG_PATH` 常量/环境变量，其次 PATH 查找）
-2. 下载完成后优先调用 ffmpeg 写入元数据
-3. ffmpeg 不可用或写入失败时，自动降级到 getID3 纯 PHP 库
-4. 前端在单曲解析和音乐下载界面实时显示当前使用的引擎
-
-**写入的元数据字段**：
-
-| 字段 | 说明 |
-|---|---|
-| title | 歌曲标题 |
-| artist | 艺术家 |
-| album | 专辑名 |
-| track | 音轨号 |
-| 封面图片 | 自动下载并嵌入 |
-
-**安装 ffmpeg（可选，获得最佳兼容性）**：
-
-```bash
-# Ubuntu / Debian
-sudo apt install ffmpeg
-
-# CentOS / RHEL (需 EPEL)
-sudo yum install ffmpeg
-
-# macOS
-brew install ffmpeg
-
-# Windows
-# 下载 https://ffmpeg.org/download.html 并添加到 PATH
-```
-
-**指定 ffmpeg 路径**（环境变量，可选）：
-
-```bash
-# Linux / macOS
-export FFMPEG_PATH=/usr/local/bin/ffmpeg
-
-# Windows
-set FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
-```
-
-> 即使不安装 ffmpeg，程序也会自动使用内置的 getID3 纯 PHP 库写入元数据，无需任何额外配置。
-
 ## 🔧 技术实现
 
 ### EAPI 加密算法
@@ -666,15 +698,31 @@ PHP 实现使用 `openssl_encrypt()` + `AES-128-ECB`。
 - 自动跳过 `#` 开头的注释行
 - 有效性判断：检查 `MUSIC_U` / `__csrf` / `NMTID` 任一字段存在
 
+### 下载文件命名规则
+
+下载文件统一命名为 `歌手-歌名-音质.格式`，例如：
+
+```
+周杰伦-屋顶-lossless.flac
+周杰伦/温岚/吴宗宪-屋顶-standard.mp3
+```
+
+- 文件名中的非法字符（`<>:"/\|?*`）会被替换为 `_`
+- 文件名最大长度 200 字符
+- 扩展名优先使用 API 返回的 `type` 字段，URL 后缀兜底
+
 ## ❓ 常见问题
 
 <details>
-<summary><b>Q：获取播放链接返回 <code>url: null</code>？</b></summary>
+<summary><b>Q：获取播放链接返回 <code>url: null</code> 或 <code>size: 0</code>？</b></summary>
 
 原因：
 1. Cookie 未配置或已失效 → 执行 `php qr_login.php login` 重新登录
 2. 音质需要更高 VIP 等级 → 尝试降低音质（如 `exhigh`）
 3. 歌曲版权限制 → 换其他歌曲
+
+> 空 cookie.txt 会导致网易云 API 返回 null URL 和 0 size，下载文件会显示 0B。
+
 </details>
 
 <details>
@@ -693,7 +741,7 @@ php -d extension=curl -d extension=openssl -S 0.0.0.0:5000 index.php
 </details>
 
 <details>
-<summary><b>Q：下载的文件没有封面/元数据？</b></summary>
+<summary><b>Q：下载的文件没有封面/元数据/歌词？</b></summary>
 
 程序采用双模式写入元数据：优先使用 ffmpeg，不可用时降级到内置的 getID3 纯 PHP 库。
 
@@ -718,6 +766,8 @@ rm -rf libs/getid3/.git
 ```
 
 4. **虚拟主机注意**：若 `shell_exec`/`exec` 被禁用，ffmpeg 不可用，程序会自动降级到 getID3
+
+5. **文件已存在跳过元数据写入**：默认情况下已存在的文件会直接返回，跳过元数据写入。使用 `force=1` 参数强制重新下载并写入元数据。
 
 </details>
 
@@ -756,12 +806,12 @@ NMTID=zzz;
 | 端点 | 方法 | 说明 |
 |---|---|---|
 | `/` | GET | Web 界面 |
-| `/health` | GET | 健康检查 |
+| `/health` | GET | 健康检查（含元数据引擎状态） |
 | `/search` | GET/POST | 歌曲搜索 |
-| `/song` | GET/POST | 单曲解析 |
+| `/song` | GET/POST | 单曲解析（支持 url/name/lyric/json） |
 | `/playlist` | GET/POST | 歌单解析 |
 | `/album` | GET/POST | 专辑解析 |
-| `/download` | GET/POST | 音乐下载 |
+| `/download` | GET/POST | 音乐下载（支持 file/json 格式，force 参数） |
 | `/qr/key` | GET | 生成二维码 |
 | `/qr/status` | GET | 检查扫码状态 |
 | `/api/info` | GET | API 信息 |
@@ -770,6 +820,7 @@ NMTID=zzz;
 
 - 原项目作者：[Suxiaoqinx](https://github.com/Suxiaoqinx) - [Netease_url](https://github.com/Suxiaoqinx/Netease_url)
 - [Ravizhan](https://github.com/ravizhan)
+- [getID3](https://github.com/JamesHeinrich/getID3) - 纯 PHP 元数据读写库
 
 ## 📄 许可证
 
