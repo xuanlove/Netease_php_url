@@ -55,9 +55,7 @@
                         </div>
                     </div>
                     <div id="parse-area" style="display:none;">
-                        <div id="ffmpeg-warning-parse" class="alert alert-warning d-none mb-3 py-2" style="font-size:0.9rem;">
-                            <strong>⚠ 未检测到 ffmpeg</strong> — 下载音乐将没有封面/元数据。<a href="https://ffmpeg.org/download.html" target="_blank" class="alert-link">安装 ffmpeg</a>
-                        </div>
+                        <div id="metadata-notice-parse" class="alert mb-3 py-2" style="font-size:0.9rem; display:none;"></div>
                         <div class="mb-3">
                             <label for="song_ids" class="form-label">歌曲ID或URL</label>
                             <input type="text" id="song_ids" class="form-control" placeholder="输入歌曲ID或URL">
@@ -98,9 +96,7 @@
                         </div>
                     </div>
                     <div id="download-area" style="display:none;">
-                        <div id="ffmpeg-warning-download" class="alert alert-warning d-none mb-3 py-2" style="font-size:0.9rem;">
-                            <strong>⚠ 未检测到 ffmpeg</strong> — 下载音乐将没有封面/元数据。<a href="https://ffmpeg.org/download.html" target="_blank" class="alert-link">安装 ffmpeg</a>
-                        </div>
+                        <div id="metadata-notice-download" class="alert mb-3 py-2" style="font-size:0.9rem; display:none;"></div>
                         <div class="mb-3">
                             <label for="download_id" class="form-label">音乐ID或URL</label>
                             <input type="text" id="download_id" class="form-control" placeholder="输入音乐ID或网易云音乐链接">
@@ -240,15 +236,38 @@
     <script src="https://mirrors.sustech.edu.cn/cdnjs/ajax/libs/twitter-bootstrap/5.1.3/js/bootstrap.bundle.min.js"></script>
     <script>
         $(document).ready(function() {
-            // 页面加载时检测 ffmpeg
-            $.get('/health', function(data) {
-                const ffmpeg = (data.data || {}).ffmpeg || {};
-                if (!ffmpeg.available) {
-                    $('#ffmpeg-warning-parse').removeClass('d-none');
-                    $('#ffmpeg-warning-download').removeClass('d-none');
+            // 元数据引擎检测，填充提示框
+            function renderMetadataNotice(meta) {
+                var $boxes = $('#metadata-notice-parse, #metadata-notice-download');
+                if (!meta) {
+                    $boxes.hide();
+                    return;
                 }
+                var engine = meta.engine || 'none';
+                var html = '';
+                var cls = '';
+                if (engine === 'ffmpeg') {
+                    cls = 'alert-success';
+                    var v = (meta.ffmpeg && meta.ffmpeg.version) ? ' v' + meta.ffmpeg.version : '';
+                    html = '<strong>✓ 已检测到 ffmpeg' + v + '</strong> — 将使用 ffmpeg 写入元数据/封面' +
+                        (meta.fallback ? '（异常时降级 ' + meta.fallback + '）' : '');
+                } else if (engine === 'getID3') {
+                    cls = 'alert-warning';
+                    html = '<strong>⚠ 未检测到 ffmpeg</strong> — 已切换到 <strong>getID3</strong> 纯 PHP 模式写入元数据/封面（支持 MP3/FLAC/OGG/Opus）';
+                } else {
+                    cls = 'alert-danger';
+                    html = '<strong>✗ 未检测到元数据引擎</strong> — 下载音乐将没有封面/元数据。请安装 <a href="https://ffmpeg.org/download.html" target="_blank" class="alert-link">ffmpeg</a> 或确保 libs/getid3 目录完整';
+                }
+                $boxes.removeClass('alert-success alert-warning alert-danger')
+                      .addClass(cls)
+                      .html(html)
+                      .show();
+            }
+            $.get('/health', function(data) {
+                var meta = (data.data || {}).metadata;
+                renderMetadataNotice(meta);
             }).fail(function() {
-                // 检测失败不阻断功能
+                $('#metadata-notice-parse, #metadata-notice-download').hide();
             });
 
             // 清理文件名中的非法字符

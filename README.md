@@ -32,7 +32,7 @@
 | 🎧 **单曲解析** | 解析单首歌曲的详细信息与播放链接 |
 | 📋 **歌单解析** | 批量解析歌单中所有歌曲 |
 | 💿 **专辑解析** | 批量解析专辑中所有歌曲 |
-| ⬇️ **音乐下载** | 多音质下载，支持 ffmpeg 写入元数据 |
+| ⬇️ **音乐下载** | 多音质下载，双模式写入元数据 (ffmpeg 优先，降级 getID3) |
 | 📱 **扫码登录** | 二维码扫码自动获取 Cookie |
 
 ### 🎼 音质支持
@@ -165,13 +165,14 @@ Netease_php_url/
 ├── index.php              # 主入口，路由分发与 API 处理
 ├── config.php             # 配置文件（API 地址、密钥、音质）
 ├── music_api.php          # API 类（加密、HTTP、搜索、歌曲、歌单、专辑、歌词、二维码）
-├── music_downloader.php   # 下载器类（同步下载、ffmpeg 元数据写入）
+├── music_downloader.php   # 下载器类（同步下载、双模式元数据写入）
 ├── qr_login.php           # 二维码登录 CLI 工具
 ├── cookie.txt             # Cookie 配置文件
 ├── .htaccess              # Apache 重写与敏感文件保护
 ├── Nginx_Rewrite.txt      # Nginx 站点配置示例
 ├── templates/
 │   └── index.html         # Web 操作界面
+├── libs/getid3/           # getID3 纯 PHP 库（元数据写入，无需 ffmpeg）
 └── downloads/             # 下载文件目录（自动创建）
     └── .htaccess          # 禁止直接访问
 ```
@@ -548,7 +549,7 @@ https://163cn.tv/xxxxx
 | `COOKIE_FILE` | `./cookie.txt` | Cookie 文件路径 |
 | `MAX_FILE_SIZE` | `500MB` | 最大文件大小限制 |
 | `CORS_ORIGINS` | `*` | CORS 跨域来源 |
-| `FFMPEG_PATH` | 环境变量 | ffmpeg 路径，留空自动检测 |
+| `FFMPEG_PATH` | 环境变量 | ffmpeg 路径，留空自动检测；不可用降级 getID3 |
 
 ## 🔒 安全防护
 
@@ -583,9 +584,22 @@ https://163cn.tv/xxxxx
 define('CORS_ORIGINS', 'https://yourdomain.com');
 ```
 
-## 🎵 ffmpeg 元数据写入（可选）
+## 🎵 元数据写入（双模式：ffmpeg 优先，降级 getID3）
 
-安装 ffmpeg 后，下载时会自动写入以下元数据：
+本程序采用 **双模式架构** 写入音频元数据/封面，确保在各种环境都能正常工作：
+
+| 模式 | 引擎 | 说明 | 支持格式 |
+|---|---|---|---|
+| **主模式** | ffmpeg | 命令行工具，支持全格式 | MP3/FLAC/M4A/MP4/OGG/Opus |
+| **降级模式** | getID3 | 纯 PHP 库，无需外部依赖 | MP3/FLAC/OGG/Opus |
+
+**工作流程**：
+1. 启动时检测 ffmpeg（优先 `FFMPEG_PATH` 常量/环境变量，其次 PATH 查找）
+2. 下载完成后优先调用 ffmpeg 写入元数据
+3. ffmpeg 不可用或写入失败时，自动降级到 getID3 纯 PHP 库
+4. 前端在单曲解析和音乐下载界面实时显示当前使用的引擎
+
+**写入的元数据字段**：
 
 | 字段 | 说明 |
 |---|---|
@@ -595,9 +609,7 @@ define('CORS_ORIGINS', 'https://yourdomain.com');
 | track | 音轨号 |
 | 封面图片 | 自动下载并嵌入 |
 
-**支持的格式**：MP3 / FLAC / M4A / MP4 / OGG / Opus
-
-**安装 ffmpeg**：
+**安装 ffmpeg（可选，获得最佳兼容性）**：
 
 ```bash
 # Ubuntu / Debian
@@ -613,7 +625,7 @@ brew install ffmpeg
 # 下载 https://ffmpeg.org/download.html 并添加到 PATH
 ```
 
-**指定 ffmpeg 路径**（环境变量）：
+**指定 ffmpeg 路径**（环境变量，可选）：
 
 ```bash
 # Linux / macOS
@@ -622,6 +634,8 @@ export FFMPEG_PATH=/usr/local/bin/ffmpeg
 # Windows
 set FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
 ```
+
+> 即使不安装 ffmpeg，程序也会自动使用内置的 getID3 纯 PHP 库写入元数据，无需任何额外配置。
 
 ## 🔧 技术实现
 
@@ -681,11 +695,30 @@ php -d extension=curl -d extension=openssl -S 0.0.0.0:5000 index.php
 <details>
 <summary><b>Q：下载的文件没有封面/元数据？</b></summary>
 
-未安装 ffmpeg 或路径未配置。安装 ffmpeg 后自动生效，或通过环境变量指定路径：
+程序采用双模式写入元数据：优先使用 ffmpeg，不可用时降级到内置的 getID3 纯 PHP 库。
+
+1. **前端提示检查**：单曲解析和音乐下载界面顶部会显示当前元数据引擎状态
+2. **安装 ffmpeg**（推荐，支持全格式含 M4A/MP4）：
 
 ```bash
-export FFMPEG_PATH=/usr/local/bin/ffmpeg
+# Linux
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Windows: 下载 https://ffmpeg.org/download.html 并添加到 PATH
 ```
+
+3. **或确保 getID3 库完整**（纯 PHP，无需安装，支持 MP3/FLAC/OGG/Opus）：
+
+```bash
+git clone https://github.com/JamesHeinrich/getID3.git libs/getid3
+rm -rf libs/getid3/.git
+```
+
+4. **虚拟主机注意**：若 `shell_exec`/`exec` 被禁用，ffmpeg 不可用，程序会自动降级到 getID3
+
 </details>
 
 <details>

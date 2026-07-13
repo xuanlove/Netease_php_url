@@ -75,5 +75,5 @@ define('QUALITY_NAMES', [
     'dolby' => '杜比全景声',
 ]);
 
-// ffmpeg 路径 (可选，用于写入元数据)
+// ffmpeg 路径 (可选，用于写入元数据；不可用时自动降级到 getID3 纯 PHP 库)
 define('FFMPEG_PATH', getenv('FFMPEG_PATH') ?: null);

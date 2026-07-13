@@ -7,11 +7,11 @@
  * - 流式下载 (直接输出到客户端)
  * - 批量下载
  * - 进度查询
- * - 基于 ffmpeg 的元数据 + 封面写入 (可选)
+ * - 元数据 + 封面写入 (双模式: ffmpeg 优先，不可用降级 getID3 纯 PHP 库)
  *
  * 设计要点:
- * 1. ffmpeg 路径懒加载: 每次写入前重新检测
- * 2. MP4 (杜比全景声 EAC3) 单独分支，启用 +faststart
+ * 1. 优先使用 ffmpeg 写入元数据 (支持 MP3/FLAC/M4A/MP4/OGG/Opus 全格式)
+ * 2. ffmpeg 不可用时自动降级到 getID3 纯 PHP 库 (支持 MP3/FLAC/OGG/Opus)
  * 3. 扩展名优先使用 API 返回的 type 字段，URL/Content-Type 兜底
  */
 
@@ -95,9 +95,6 @@ class MusicDownloader
     /** @var MusicAPI */
     private $api;
 
-    /** @var string|null ffmpeg路径 */
-    private $ffmpegPath;
-
     // API 返回的 type -> 文件扩展名
     private static $apiTypeToExt = [
         'mp3' => '.mp3',
@@ -108,25 +105,25 @@ class MusicDownloader
         'opus' => '.opus',
     ];
 
-    // 文件扩展名 -> ffmpeg 输出 muxer 名称
-    private static $extToFfmpegFormat = [
-        '.mp3' => 'mp3',
-        '.flac' => 'flac',
-        '.m4a' => 'mp4',
-        '.mp4' => 'mp4',
-        '.ogg' => 'ogg',
-        '.opus' => 'opus',
+    // getID3 支持元数据写入的扩展名 -> 标签格式
+    private static $extToTagFormat = [
+        '.mp3' => 'id3v2.3',
+        '.flac' => 'metaflac',
+        '.ogg' => 'vorbiscomment',
+        '.opus' => 'vorbiscomment',
     ];
 
-    // 支持元数据写入的扩展名
-    private static $metadataFormats = ['.mp3', '.flac', '.m4a', '.mp4', '.ogg', '.opus'];
+    // ffmpeg 支持元数据写入的扩展名列表 (覆盖面更广，含 M4A/MP4)
+    private static $ffmpegSupportedExt = ['mp3', 'flac', 'm4a', 'mp4', 'ogg', 'opus'];
+
+    /** @var string|null ffmpeg 可执行文件路径 (运行期解析，null 表示不可用) */
+    private $ffmpegPath;
 
     /**
      * @param string $downloadDir 下载目录
      * @param int $maxConcurrent 最大并发下载数
-     * @param string|null $ffmpegPath ffmpeg路径
      */
-    public function __construct(string $downloadDir = DOWNLOADS_DIR, int $maxConcurrent = 3, ?string $ffmpegPath = null)
+    public function __construct(string $downloadDir = DOWNLOADS_DIR, int $maxConcurrent = 3)
     {
         $this->downloadDir = $downloadDir;
         if (!is_dir($this->downloadDir)) {
@@ -134,45 +131,7 @@ class MusicDownloader
         }
         $this->maxConcurrent = $maxConcurrent;
         $this->api = new MusicAPI();
-
-        // ffmpeg路径: 优先使用参数，其次配置，最后检测系统PATH
-        $this->ffmpegPath = $ffmpegPath ?: FFMPEG_PATH;
-        if (!$this->ffmpegPath) {
-            $this->ffmpegPath = $this->which('ffmpeg');
-        }
-        if (!$this->ffmpegPath) {
-            error_log("警告: 未检测到 ffmpeg，写入元数据功能将不可用");
-        }
-    }
-
-    /**
-     * 模拟 which 命令查找可执行文件
-     */
-    private function which(string $program): ?string
-    {
-        // Windows
-        if (PHP_OS_FAMILY === 'Windows') {
-            $paths = explode(PATH_SEPARATOR, getenv('PATH'));
-            $exts = ['.exe', '.bat', '.cmd'];
-            foreach ($paths as $path) {
-                foreach ($exts as $ext) {
-                    $full = $path . DIRECTORY_SEPARATOR . $program . $ext;
-                    if (file_exists($full) && is_executable($full)) {
-                        return $full;
-                    }
-                }
-            }
-        } else {
-            // Unix-like
-            $paths = explode(PATH_SEPARATOR, getenv('PATH'));
-            foreach ($paths as $path) {
-                $full = $path . DIRECTORY_SEPARATOR . $program;
-                if (file_exists($full) && is_executable($full)) {
-                    return $full;
-                }
-            }
-        }
-        return null;
+        $this->ffmpegPath = $this->resolveFfmpeg();
     }
 
     /**
@@ -206,44 +165,6 @@ class MusicDownloader
         if (strpos($urlLower, '.m4a') !== false || strpos($urlLower, '.mp4') !== false) return '.m4a';
 
         return '.mp3';
-    }
-
-    /**
-     * 懒加载解析 ffmpeg 路径
-     */
-    private function resolveFfmpeg(): ?string
-    {
-        if ($this->ffmpegPath) {
-            return $this->ffmpegPath;
-        }
-        $path = $this->which('ffmpeg');
-        if ($path) {
-            $this->ffmpegPath = $path;
-        }
-        return $path;
-    }
-
-    /**
-     * 检测 ffmpeg 是否可用
-     *
-     * @return array{available: bool, path: string|null, version: string|null}
-     */
-    public function detectFfmpeg(): array
-    {
-        $path = $this->resolveFfmpeg();
-        if (!$path) {
-            return ['available' => false, 'path' => null, 'version' => null];
-        }
-
-        // 尝试获取版本信息
-        $version = null;
-        $cmd = escapeshellarg($path) . ' -version';
-        $output = @shell_exec($cmd . ' 2>&1');
-        if ($output && preg_match('/ffmpeg version\s+([^\s]+)/i', $output, $m)) {
-            $version = $m[1];
-        }
-
-        return ['available' => true, 'path' => $path, 'version' => $version];
     }
 
     /**
@@ -352,8 +273,8 @@ class MusicDownloader
             // 流式下载
             $this->downloadFile($musicInfo->downloadUrl, $filePath);
 
-            // 写入元数据 (失败不影响主流程)
-            $this->writeMetadataWithFfmpeg($filePath, $musicInfo);
+            // 写入元数据 (双模式: ffmpeg 优先，不可用降级 getID3；失败不影响主流程)
+            $this->writeMetadata($filePath, $musicInfo);
 
             return new DownloadResult(true, $filePath, filesize($filePath), '', $musicInfo);
 
@@ -494,12 +415,139 @@ class MusicDownloader
         }
     }
 
+    // ==================== 元数据写入 (双模式) ====================
+
+    /**
+     * 双模式写入元数据入口
+     *
+     * 优先使用 ffmpeg；不可用或写入失败时降级到 getID3 纯 PHP 库
+     *
+     * @param string $filePath 文件路径
+     * @param MusicInfo $musicInfo 音乐信息
+     * @return bool 是否写入成功
+     */
+    private function writeMetadata(string $filePath, MusicInfo $musicInfo): bool
+    {
+        // 1. 优先尝试 ffmpeg
+        if ($this->ffmpegPath !== null) {
+            if ($this->writeMetadataWithFfmpeg($filePath, $musicInfo)) {
+                return true;
+            }
+            error_log("ffmpeg 元数据写入失败，降级到 getID3");
+        }
+
+        // 2. 降级到 getID3
+        return $this->writeMetadataWithGetid3($filePath, $musicInfo);
+    }
+
+    /**
+     * 获取当前元数据引擎信息 (供健康检查 / 前端提示使用)
+     *
+     * @return array 引擎状态信息
+     */
+    public function getMetadataEngine(): array
+    {
+        $ffmpegInfo = $this->detectFfmpeg();
+        $getid3Path = __DIR__ . '/libs/getid3/getid3/getid3.php';
+        $getid3Available = file_exists($getid3Path);
+
+        if ($ffmpegInfo['available']) {
+            $engine = 'ffmpeg';
+            $fallback = $getid3Available ? 'getID3' : null;
+        } else {
+            $engine = $getid3Available ? 'getID3' : 'none';
+            $fallback = null;
+        }
+
+        return [
+            'engine' => $engine,
+            'fallback' => $fallback,
+            'ffmpeg' => $ffmpegInfo,
+            'getid3' => ['available' => $getid3Available],
+        ];
+    }
+
     // ==================== ffmpeg 元数据写入 ====================
 
     /**
-     * 使用 ffmpeg 写入音频元数据
+     * 检测 ffmpeg 可用性
      *
-     * 处理: title/artist/album/track + 封面 (如果支持)
+     * @return array {available: bool, path: string|null, version: string|null}
+     */
+    public function detectFfmpeg(): array
+    {
+        if ($this->ffmpegPath === null) {
+            return ['available' => false, 'path' => null, 'version' => null];
+        }
+
+        $output = @shell_exec('"' . $this->ffmpegPath . '" -version 2>&1');
+        if (empty($output) || strpos($output, 'ffmpeg version') === false) {
+            return ['available' => false, 'path' => $this->ffmpegPath, 'version' => null];
+        }
+
+        $version = '';
+        if (preg_match('/ffmpeg version ([\d.\-a-z]+)/i', $output, $m)) {
+            $version = $m[1];
+        }
+        return ['available' => true, 'path' => $this->ffmpegPath, 'version' => $version];
+    }
+
+    /**
+     * 解析 ffmpeg 路径
+     *
+     * 优先级: FFMPEG_PATH 常量 > PATH 环境变量查找
+     *
+     * @return string|null
+     */
+    private function resolveFfmpeg(): ?string
+    {
+        // shell_exec 被禁用时直接返回 null
+        if (!function_exists('shell_exec')) {
+            return null;
+        }
+
+        // 1. 配置的常量
+        if (defined('FFMPEG_PATH') && FFMPEG_PATH) {
+            $path = FFMPEG_PATH;
+            // Windows 下 is_executable 对 .exe 可能误判，放宽检查
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        // 2. PATH 中查找
+        return $this->which('ffmpeg');
+    }
+
+    /**
+     * 在 PATH 中查找可执行命令
+     *
+     * @param string $cmd 命令名
+     * @return string|null 完整路径
+     */
+    private function which(string $cmd): ?string
+    {
+        $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+        $checkCmd = $isWindows ? "where {$cmd} 2>nul" : "command -v {$cmd} 2>/dev/null";
+        $result = @shell_exec($checkCmd);
+        if (empty($result)) {
+            return null;
+        }
+        $result = trim($result);
+        // Windows 的 where 可能返回多行，取第一行
+        if (strpos($result, "\n") !== false) {
+            $lines = explode("\n", $result);
+            $result = trim($lines[0]);
+        }
+        // 再次验证文件存在
+        if ($result !== '' && file_exists($result)) {
+            return $result;
+        }
+        return null;
+    }
+
+    /**
+     * 使用 ffmpeg 写入音频元数据 + 封面
      *
      * @param string $filePath 文件路径
      * @param MusicInfo $musicInfo 音乐信息
@@ -507,17 +555,182 @@ class MusicDownloader
      */
     private function writeMetadataWithFfmpeg(string $filePath, MusicInfo $musicInfo): bool
     {
-        $ffmpegPath = $this->resolveFfmpeg();
-        if (!$ffmpegPath) {
-            error_log("跳过元数据写入: ffmpeg 不可用");
+        if ($this->ffmpegPath === null) {
             return false;
         }
 
-        $fileExt = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
-        $fileExt = '.' . $fileExt;
+        $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+        if (!in_array($ext, self::$ffmpegSupportedExt)) {
+            error_log("ffmpeg 跳过元数据写入: 不支持格式 {$ext}");
+            return false;
+        }
 
-        if (!in_array($fileExt, self::$metadataFormats)) {
-            error_log("跳过元数据写入: 不支持的格式 {$fileExt}");
+        if (!file_exists($filePath)) {
+            error_log("ffmpeg 跳过元数据写入: 文件不存在 {$filePath}");
+            return false;
+        }
+
+        // 下载封面到临时文件
+        $coverPath = $this->downloadCoverToTemp($musicInfo->picUrl);
+
+        try {
+            $tmpOutput = $filePath . '.tmp_' . bin2hex(random_bytes(4));
+            $cmd = $this->buildFfmpegCommand($filePath, $tmpOutput, $musicInfo, $coverPath);
+
+            $output = [];
+            $returnCode = 0;
+            @exec($cmd . ' 2>&1', $output, $returnCode);
+
+            if ($returnCode === 0 && file_exists($tmpOutput) && filesize($tmpOutput) > 0) {
+                // 替换原文件
+                @unlink($filePath);
+                @rename($tmpOutput, $filePath);
+                return true;
+            }
+
+            error_log("ffmpeg 写入失败 (code={$returnCode}): " . implode("\n", $output));
+            if (file_exists($tmpOutput)) {
+                @unlink($tmpOutput);
+            }
+            return false;
+        } catch (Exception $e) {
+            error_log("ffmpeg 写入异常: " . $e->getMessage());
+            return false;
+        } finally {
+            if ($coverPath !== null && file_exists($coverPath)) {
+                @unlink($coverPath);
+            }
+        }
+    }
+
+    /**
+     * 下载封面图片到临时文件
+     *
+     * @param string $picUrl 封面 URL
+     * @return string|null 临时文件路径
+     */
+    private function downloadCoverToTemp(string $picUrl): ?string
+    {
+        if (empty($picUrl)) {
+            return null;
+        }
+
+        try {
+            $content = @file_get_contents($picUrl);
+            if ($content === false || $content === '') {
+                return null;
+            }
+
+            $tmpBase = tempnam($this->downloadDir, 'cover_');
+            if ($tmpBase === false) {
+                return null;
+            }
+
+            // 根据图像类型追加扩展名 (ffmpeg 读取图片更可靠)
+            $finalPath = $tmpBase;
+            if (function_exists('exif_imagetype')) {
+                $tmpProbe = tempnam($this->downloadDir, 'probe_');
+                if ($tmpProbe !== false) {
+                    file_put_contents($tmpProbe, $content);
+                    $imageType = @exif_imagetype($tmpProbe);
+                    @unlink($tmpProbe);
+                    if ($imageType !== false) {
+                        $ext = image_type_to_extension($imageType, false); // 'jpeg' / 'png' / 'gif'
+                        $finalPath = $tmpBase . '.' . $ext;
+                    }
+                }
+            }
+
+            file_put_contents($finalPath, $content);
+            @unlink($tmpBase);
+            return $finalPath;
+        } catch (Exception $e) {
+            error_log("封面下载失败: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 构建 ffmpeg 写入元数据的命令行
+     *
+     * @param string $input 输入文件
+     * @param string $output 输出文件
+     * @param MusicInfo $info 音乐信息
+     * @param string|null $coverPath 封面文件路径
+     * @return string 完整命令
+     */
+    private function buildFfmpegCommand(string $input, string $output, MusicInfo $info, ?string $coverPath): string
+    {
+        $parts = [];
+        $parts[] = '"' . $this->ffmpegPath . '"';
+        $parts[] = '-i';
+        $parts[] = '"' . $input . '"';
+
+        // 封面作为第二个输入
+        if ($coverPath !== null) {
+            $parts[] = '-i';
+            $parts[] = '"' . $coverPath . '"';
+            $parts[] = '-map 0:a';
+            $parts[] = '-map 1:0';
+            $parts[] = '-c copy';
+            $parts[] = '-disposition:v:0 attached_pic';
+        } else {
+            $parts[] = '-c copy';
+        }
+
+        // ID3v2 版本 (仅 MP3)
+        $ext = strtolower(pathinfo($input, PATHINFO_EXTENSION));
+        if ($ext === 'mp3') {
+            $parts[] = '-id3v2_version 3';
+        }
+
+        // 元数据字段
+        if ($info->name) {
+            $parts[] = '-metadata title=' . escapeshellarg($info->name);
+        }
+        if ($info->artists) {
+            $parts[] = '-metadata artist=' . escapeshellarg($info->artists);
+            $parts[] = '-metadata album_artist=' . escapeshellarg($info->artists);
+        }
+        if ($info->album) {
+            $parts[] = '-metadata album=' . escapeshellarg($info->album);
+        }
+        if ($info->trackNumber > 0) {
+            $parts[] = '-metadata track=' . escapeshellarg((string)$info->trackNumber);
+        }
+        $parts[] = '-metadata comment=' . escapeshellarg('Downloaded from Netease Cloud Music');
+
+        // 封面流元数据
+        if ($coverPath !== null) {
+            $parts[] = '-metadata:s:v title=' . escapeshellarg('Album cover');
+            $parts[] = '-metadata:s:v comment=' . escapeshellarg('Cover (front)');
+        }
+
+        // 覆盖输出
+        $parts[] = '-y';
+        $parts[] = '"' . $output . '"';
+
+        return implode(' ', $parts);
+    }
+
+    // ==================== getID3 元数据写入 ====================
+
+    /**
+     * 使用 getID3 (纯PHP) 写入音频元数据
+     *
+     * 处理: title/artist/album/track + 封面 (如果支持)
+     *
+     * @param string $filePath 文件路径
+     * @param MusicInfo $musicInfo 音乐信息
+     * @return bool 是否写入成功
+     */
+    private function writeMetadataWithGetid3(string $filePath, MusicInfo $musicInfo): bool
+    {
+        $fileExt = '.' . strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+
+        // 检查 getID3 是否支持该格式
+        if (!isset(self::$extToTagFormat[$fileExt])) {
+            error_log("跳过元数据写入: getID3 不支持格式 {$fileExt}");
             return false;
         }
 
@@ -526,167 +739,80 @@ class MusicDownloader
             return false;
         }
 
-        // 临时输出文件
-        $tmpOutput = preg_replace('/\.' . pathinfo($filePath, PATHINFO_EXTENSION) . '$/', '.tagging.' . pathinfo($filePath, PATHINFO_EXTENSION), $filePath);
-        $coverTmp = null;
+        // 加载 getID3 库
+        $getid3Path = __DIR__ . '/libs/getid3/getid3/getid3.php';
+        if (!file_exists($getid3Path)) {
+            error_log("跳过元数据写入: getID3 库不存在");
+            return false;
+        }
+
+        require_once $getid3Path;
+        require_once __DIR__ . '/libs/getid3/getid3/write.php';
 
         try {
-            // 下载封面到临时文件
+            $tagFormat = self::$extToTagFormat[$fileExt];
+            $tagwriter = new getid3_writetags;
+            $tagwriter->filename = $filePath;
+            $tagwriter->tagformats = [$tagFormat];
+            $tagwriter->overwrite_tags = true;
+            $tagwriter->remove_other_tags = false;
+            $tagwriter->tag_encoding = 'UTF-8';
+
+            // 构建元数据 (所有值必须是数组)
+            $tagData = [];
+            if ($musicInfo->name) {
+                $tagData['title'] = [$musicInfo->name];
+            }
+            if ($musicInfo->artists) {
+                $tagData['artist'] = [$musicInfo->artists];
+                $tagData['album_artist'] = [$musicInfo->artists];
+            }
+            if ($musicInfo->album) {
+                $tagData['album'] = [$musicInfo->album];
+            }
+            $tagData['comment'] = ['Downloaded from Netease Cloud Music'];
+            if ($musicInfo->trackNumber > 0) {
+                $tagData['track_number'] = [(string)$musicInfo->trackNumber];
+            }
+
+            // 下载并嵌入封面图片
             if ($musicInfo->picUrl) {
                 try {
-                    $coverContent = file_get_contents($musicInfo->picUrl);
-                    if ($coverContent !== false) {
-                        $coverTmp = tempnam($this->downloadDir, 'cover_');
-                        $coverTmp = preg_replace('/$/', '.jpg', $coverTmp);
-                        // 确保扩展名
-                        if (!preg_match('/\.jpg$/', $coverTmp)) {
-                            $newCover = $coverTmp . '.jpg';
-                            rename($coverTmp, $newCover);
-                            $coverTmp = $newCover;
+                    $coverContent = @file_get_contents($musicInfo->picUrl);
+                    if ($coverContent !== false && function_exists('exif_imagetype')) {
+                        $tmpCover = tempnam($this->downloadDir, 'cover_');
+                        file_put_contents($tmpCover, $coverContent);
+                        $imageType = @exif_imagetype($tmpCover);
+                        @unlink($tmpCover);
+
+                        if ($imageType !== false) {
+                            $mime = image_type_to_mime_type($imageType);
+                            $tagData['attached_picture'][0]['data'] = $coverContent;
+                            $tagData['attached_picture'][0]['picturetypeid'] = 3; // Cover (front)
+                            $tagData['attached_picture'][0]['description'] = 'Album cover';
+                            $tagData['attached_picture'][0]['mime'] = $mime;
                         }
-                        file_put_contents($coverTmp, $coverContent);
                     }
                 } catch (Exception $e) {
                     error_log("封面下载失败，跳过封面写入: " . $e->getMessage());
-                    $coverTmp = null;
                 }
             }
 
-            // 构造 ffmpeg 命令
-            $outputFormat = self::$extToFfmpegFormat[$fileExt] ?? '';
-            $cmd = escapeshellarg($ffmpegPath) . ' -y -loglevel error -i ' . escapeshellarg($filePath);
-            if ($coverTmp) {
-                $cmd .= ' -i ' . escapeshellarg($coverTmp);
-            }
+            $tagwriter->tag_data = $tagData;
 
-            // 通用元数据
-            $meta = [
-                'title' => $musicInfo->name,
-                'artist' => $musicInfo->artists,
-                'album' => $musicInfo->album,
-                'album_artist' => $musicInfo->artists,
-                'comment' => 'Downloaded from Netease Cloud Music',
-            ];
-            if ($musicInfo->trackNumber > 0) {
-                $meta['track'] = (string)$musicInfo->trackNumber;
-                $meta['tracktotal'] = (string)$musicInfo->trackNumber;
-            }
-            foreach ($meta as $k => $v) {
-                if ($v) {
-                    $cmd .= ' -metadata ' . escapeshellarg("{$k}={$v}");
+            if ($tagwriter->WriteTags()) {
+                if (!empty($tagwriter->warnings)) {
+                    error_log("getID3 写入警告: " . implode('; ', $tagwriter->warnings));
                 }
-            }
-
-            // 各格式的 mapping / 编码选项
-            $cmd .= ' ' . implode(' ', $this->buildFormatArgs($fileExt, $coverTmp !== null));
-
-            // -f 必须放在所有 -i 之后
-            if ($outputFormat) {
-                $cmd .= ' -f ' . escapeshellarg($outputFormat);
-            }
-            $cmd .= ' ' . escapeshellarg($tmpOutput);
-
-            // 执行
-            $output = [];
-            $returnCode = 0;
-            exec($cmd . ' 2>&1', $output, $returnCode);
-
-            if ($returnCode === 0 && file_exists($tmpOutput)) {
-                // 原子替换原文件
-                rename($tmpOutput, $filePath);
                 return true;
             }
 
-            error_log("ffmpeg 写入元数据失败: " . implode("\n", $output));
+            error_log("getID3 写入元数据失败: " . implode('; ', $tagwriter->errors));
             return false;
 
         } catch (Exception $e) {
-            error_log("ffmpeg 写入元数据异常: " . $e->getMessage());
+            error_log("getID3 写入元数据异常: " . $e->getMessage());
             return false;
-        } finally {
-            // 清理封面临时文件
-            if ($coverTmp && file_exists($coverTmp)) {
-                @unlink($coverTmp);
-            }
-            // 清理可能残留的临时输出
-            if (file_exists($tmpOutput)) {
-                @unlink($tmpOutput);
-            }
-        }
-    }
-
-    /**
-     * 根据文件格式构造 mapping / 编码参数
-     */
-    private function buildFormatArgs(string $fileExt, bool $hasCover): array
-    {
-        switch ($fileExt) {
-            case '.mp3':
-                // MP3: 封面通过 ID3v2 APIC 帧写入
-                if ($hasCover) {
-                    return [
-                        '-map', '0:a', '-map', '1:v',
-                        '-c:a', 'copy', '-c:v', 'copy',
-                        '-id3v2_version', '3',
-                        '-metadata:s:v', 'title=Album cover',
-                        '-metadata:s:v', 'comment=Cover (front)',
-                    ];
-                }
-                return ['-map', '0:a', '-c:a', 'copy', '-id3v2_version', '3'];
-
-            case '.flac':
-                // FLAC: 原生支持封面
-                if ($hasCover) {
-                    return [
-                        '-map', '0', '-map', '1',
-                        '-c', 'copy',
-                        '-disposition:v:0', 'attached_pic',
-                    ];
-                }
-                return ['-map', '0', '-c', 'copy'];
-
-            case '.m4a':
-                // M4A: AAC 音频 + mp4 容器
-                if ($hasCover) {
-                    return [
-                        '-map', '0:a', '-map', '1:v',
-                        '-c', 'copy',
-                        '-disposition:v:0', 'attached_pic',
-                        '-metadata:s:v', 'title=Album cover',
-                        '-metadata:s:v', 'comment=Cover (front)',
-                    ];
-                }
-                return ['-map', '0:a', '-c:a', 'copy'];
-
-            case '.mp4':
-                // MP4 (杜比全景声 EAC3)
-                if ($hasCover) {
-                    return [
-                        '-map', '0', '-map', '1:v',
-                        '-c', 'copy',
-                        '-disposition:v:0', 'attached_pic',
-                        '-metadata:s:v', 'title=Album cover',
-                        '-metadata:s:v', 'comment=Cover (front)',
-                        '-movflags', '+faststart',
-                    ];
-                }
-                return ['-map', '0', '-c', 'copy', '-movflags', '+faststart'];
-
-            case '.ogg':
-            case '.opus':
-                if ($hasCover) {
-                    return [
-                        '-map', '0:a', '-map', '1:v',
-                        '-c:a', 'copy', '-c:v', 'copy',
-                    ];
-                }
-                return ['-map', '0:a', '-c:a', 'copy'];
-
-            default:
-                if ($hasCover) {
-                    return ['-map', '0:a', '-map', '1:v', '-c', 'copy'];
-                }
-                return ['-map', '0:a', '-c:a', 'copy'];
         }
     }
 }

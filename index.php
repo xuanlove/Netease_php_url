@@ -305,14 +305,13 @@ try {
         case 'health':
             $cookies = MusicAPI::loadCookies();
             $cookieStatus = !empty($cookies) ? 'valid' : 'invalid';
-            $ffmpegInfo = $service->getDownloader()->detectFfmpeg();
             APIResponse::success([
                 'service' => 'running',
                 'timestamp' => time(),
                 'cookie_status' => $cookieStatus,
                 'cookie_count' => count($cookies),
                 'downloads_dir' => realpath(DOWNLOADS_DIR) ?: DOWNLOADS_DIR,
-                'ffmpeg' => $ffmpegInfo,
+                'metadata' => $service->getDownloader()->getMetadataEngine(),
                 'version' => '2.0.0-php',
             ], 'API服务运行正常');
             break;
