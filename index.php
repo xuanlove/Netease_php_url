@@ -521,6 +521,7 @@ function handleGetSongInfo(MusicAPIService $service): void
                 $responseData['url'] = $urlData['url'] ?? '';
                 $responseData['size'] = $service->formatFileSize($urlData['size'] ?? 0);
                 $responseData['level'] = $urlData['level'] ?? $level;
+                $responseData['type'] = $urlData['type'] ?? null;
             } else {
                 $responseData['url'] = '';
                 $responseData['size'] = '获取失败';
