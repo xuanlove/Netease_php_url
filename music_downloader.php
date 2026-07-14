@@ -437,6 +437,99 @@ class MusicDownloader
     }
 
     /**
+     * 批量下载并打包为 ZIP 文件
+     *
+     * 流程:
+     * 1. 依次下载每首歌曲到本地 (复用已存在文件)
+     * 2. 使用 ZipArchive 打包所有成功下载的文件
+     * 3. 自动去重文件名 (同名追加序号)
+     *
+     * @param array $musicIds 音乐ID列表
+     * @param string $quality 音质
+     * @param string $zipName ZIP 文件名 (不含扩展名)
+     * @return array {zipPath: string, zipFilename: string, total: int, succeeded: int, failed: int, errors: string[]}
+     * @throws DownloadException 当没有可下载的歌曲或 ZipArchive 不可用时抛出
+     */
+    public function downloadBatchAsZip(array $musicIds, string $quality = 'standard', string $zipName = 'songs'): array
+    {
+        $musicIds = array_values(array_unique(array_filter($musicIds, fn($id) => $id !== '' && $id !== null)));
+        if (empty($musicIds)) {
+            throw new DownloadException('没有可下载的歌曲 ID');
+        }
+        if (count($musicIds) > 200) {
+            throw new DownloadException('单次打包下载不能超过 200 首歌曲');
+        }
+        if (!class_exists('ZipArchive')) {
+            throw new DownloadException('服务器未安装 PHP ZipArchive 扩展');
+        }
+
+        // 1. 依次下载每首歌曲
+        $results = $this->downloadBatch($musicIds, $quality);
+
+        // 2. 收集所有成功下载的文件 (带去重)
+        $fileEntries = []; // ['localPath' => ..., 'zipEntryName' => ...]
+        $usedNames = []; // 用于文件名去重
+        $errors = [];
+        $succeeded = 0;
+        foreach ($results as $r) {
+            if ($r->success && $r->filePath && file_exists($r->filePath)) {
+                $base = basename($r->filePath);
+                $name = $base;
+                if (isset($usedNames[$name])) {
+                    $usedNames[$name]++;
+                    $pathInfo = pathinfo($base);
+                    $name = $pathInfo['filename'] . ' (' . $usedNames[$name] . ').' . $pathInfo['extension'];
+                } else {
+                    $usedNames[$name] = 0;
+                }
+                $fileEntries[] = ['localPath' => $r->filePath, 'zipEntryName' => $name];
+                $succeeded++;
+            } else {
+                $errors[] = $r->errorMessage ?: '未知错误';
+            }
+        }
+
+        if (empty($fileEntries)) {
+            throw new DownloadException('所有歌曲下载失败: ' . implode('; ', array_slice($errors, 0, 3)));
+        }
+
+        // 3. 创建 ZIP 文件
+        $safeZipName = $this->sanitizeFilename($zipName) ?: 'songs';
+        $zipFilename = $safeZipName . '_' . date('Ymd_His') . '.zip';
+        $zipPath = $this->downloadDir . DIRECTORY_SEPARATOR . $zipFilename;
+
+        $zip = new ZipArchive();
+        $flags = ZipArchive::CREATE | ZipArchive::OVERWRITE;
+        if ($zip->open($zipPath, $flags) !== true) {
+            throw new DownloadException("无法创建 ZIP 文件: {$zipFilename}");
+        }
+
+        foreach ($fileEntries as $entry) {
+            // addFile 不会立即读取，会在 close() 时流式写入
+            $zip->addFile($entry['localPath'], $entry['zipEntryName']);
+        }
+
+        // 音频文件已是有损压缩格式, 使用 deflate 几乎不减小体积反而耗费 CPU
+        // 对所有文件使用 STORE (不压缩), 仅打包归档
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $zip->setCompressionIndex($i, ZipArchive::CM_STORE);
+        }
+
+        if (!$zip->close()) {
+            throw new DownloadException('ZIP 文件关闭失败');
+        }
+
+        return [
+            'zipPath' => $zipPath,
+            'zipFilename' => $zipFilename,
+            'total' => count($musicIds),
+            'succeeded' => $succeeded,
+            'failed' => count($musicIds) - $succeeded,
+            'errors' => $errors,
+        ];
+    }
+
+    /**
      * 查询下载进度
      *
      * @param int|string $musicId 音乐ID

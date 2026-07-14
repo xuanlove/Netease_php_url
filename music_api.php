@@ -564,6 +564,66 @@ class MusicAPI
     }
 
     /**
+     * 获取网易云官方排行榜列表
+     * 返回所有榜单摘要 (飙升榜、新歌榜、热歌榜、原创榜等 + 23 种特色榜)
+     *
+     * @param array $cookies 用户cookies
+     * @return array 榜单数组
+     */
+    public function getToplistList(array $cookies = []): array
+    {
+        $url = TOPLIST_API;
+        $cookieStr = self::buildCookieString($cookies);
+
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_POST => false,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_HTTPHEADER => [
+                'User-Agent: ' . USER_AGENT,
+                'Referer: ' . REFERER,
+            ],
+            CURLOPT_COOKIE => $cookieStr,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode >= 400) {
+            throw new APIException("获取官方排行榜请求失败: HTTP {$httpCode}");
+        }
+
+        $result = json_decode($response, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new APIException('解析排行榜响应失败: ' . json_last_error_msg());
+        }
+
+        if (($result['code'] ?? -1) != 200) {
+            throw new APIException('获取官方排行榜失败: ' . ($result['message'] ?? '未知错误'));
+        }
+
+        $list = [];
+        foreach (($result['list'] ?? []) as $item) {
+            $list[] = [
+                'id' => $item['id'] ?? 0,
+                'name' => $item['name'] ?? '',
+                'description' => $item['description'] ?? '',
+                'coverImgUrl' => $item['coverImgUrl'] ?? '',
+                'updateFrequency' => $item['updateFrequency'] ?? '',
+                'trackCount' => $item['trackCount'] ?? 0,
+                'playCount' => $item['playCount'] ?? 0,
+            ];
+        }
+
+        return $list;
+    }
+
+    /**
      * 获取专辑详情
      *
      * @param int|string $albumId 专辑ID
@@ -884,6 +944,123 @@ class MusicAPI
             }
         }
         return false;
+    }
+
+    /**
+     * 加载多个 Cookie 账号
+     *
+     * cookie.txt 中每个非注释、非空行 = 一个 Cookie 账号
+     * 行内可用 ; 分隔多个键值对
+     *
+     * @return array<int, array> Cookie 账号数组
+     */
+    public static function loadAllCookieSets(string $path = COOKIE_FILE): array
+    {
+        if (!is_file($path)) {
+            return [];
+        }
+
+        $content = file_get_contents($path);
+        if ($content === false) {
+            return [];
+        }
+
+        $content = trim($content);
+        if ($content === '') {
+            return [];
+        }
+
+        $lines = explode("\n", $content);
+        $cookieSets = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            // 跳过空行和注释行
+            if ($line === '' || $line[0] === '#') {
+                continue;
+            }
+            // 每行解析为一个 Cookie 集合
+            $cookies = self::parseCookieString($line);
+            if (!empty($cookies)) {
+                $cookieSets[] = $cookies;
+            }
+        }
+
+        return $cookieSets;
+    }
+
+    /**
+     * 检测单个 Cookie 账号的状态 (有效/失效 + VIP 等级)
+     *
+     * @param array $cookies Cookie 键值对
+     * @return array { status: 'vip'|'normal'|'invalid', nickname, userId, vipType }
+     */
+    public function checkCookieStatus(array $cookies): array
+    {
+        // 未登录态
+        if (!self::isCookieValid($cookies)) {
+            return [
+                'status' => 'invalid',
+                'nickname' => '',
+                'user_id' => 0,
+                'vip_type' => 0,
+                'message' => 'Cookie 无关键字',
+            ];
+        }
+
+        try {
+            // 调用网易云账号信息接口
+            $url = 'https://music.163.com/api/nuser/account/get';
+            $response = self::getRequest($url, $cookies);
+            $data = json_decode($response, true);
+
+            if (!isset($data['code']) || $data['code'] !== 200) {
+                return [
+                    'status' => 'invalid',
+                    'nickname' => '',
+                    'user_id' => 0,
+                    'vip_type' => 0,
+                    'message' => 'Cookie 已失效',
+                ];
+            }
+
+            // 检查是否有账号信息
+            $account = $data['account'] ?? null;
+            $profile = $data['profile'] ?? null;
+
+            if (!$account || !$profile) {
+                return [
+                    'status' => 'invalid',
+                    'nickname' => '',
+                    'user_id' => 0,
+                    'vip_type' => 0,
+                    'message' => 'Cookie 已失效',
+                ];
+            }
+
+            $vipType = $profile['vipType'] ?? 0;
+            $nickname = $profile['nickname'] ?? '未知用户';
+            $userId = $account['id'] ?? 0;
+
+            // vipType: 0 = 普通, 11 = 黑胶VIP, 其他 >= 10 也视为 VIP
+            $isVip = ($vipType >= 10);
+
+            return [
+                'status' => $isVip ? 'vip' : 'normal',
+                'nickname' => $nickname,
+                'user_id' => $userId,
+                'vip_type' => $vipType,
+                'message' => $isVip ? 'VIP 有效' : '普通用户',
+            ];
+
+        } catch (Exception $e) {
+            return [
+                'status' => 'invalid',
+                'nickname' => '',
+                'user_id' => 0,
+                'vip_type' => 0,
+                'message' => '检测失败: ' . $e->getMessage(),
+            ];
+        }
     }
 }
 

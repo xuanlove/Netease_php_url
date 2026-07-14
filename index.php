@@ -317,6 +317,11 @@ try {
             ], 'API服务运行正常');
             break;
 
+        // ==================== Cookie 状态检测 ====================
+        case 'cookie/status':
+            handleCookieStatus();
+            break;
+
         // ==================== API信息 ====================
         case 'api/info':
         case 'api-info':
@@ -330,7 +335,10 @@ try {
                     '/search' => 'GET/POST - 搜索音乐',
                     '/playlist' => 'GET/POST - 获取歌单详情',
                     '/album' => 'GET/POST - 获取专辑详情',
+                    '/toplist' => 'GET - 获取官方排行榜列表/详情',
                     '/download' => 'GET/POST - 下载音乐',
+                    '/download/batch' => 'POST - 批量打包下载为 ZIP',
+                    '/cookie/status' => 'GET - 检测 Cookie 状态',
                     '/qr/key' => 'GET - 生成二维码key',
                     '/qr/status' => 'GET - 检查二维码登录状态',
                     '/api/info' => 'GET - API信息',
@@ -365,9 +373,20 @@ try {
             handleGetAlbum($service);
             break;
 
+        // ==================== 官方排行榜 ====================
+        case 'toplist':
+            handleGetToplist($service);
+            break;
+
         // ==================== 下载音乐 ====================
         case 'download':
             handleDownloadMusic($service);
+            break;
+
+        // ==================== 批量打包下载 (ZIP) ====================
+        case 'download/batch':
+        case 'download-batch':
+            handleDownloadBatchZip($service);
             break;
 
         // ==================== 二维码登录 ====================
@@ -522,11 +541,13 @@ function handleGetSongInfo(MusicAPIService $service): void
                 $urlData = $urlInfo['data'][0];
                 $responseData['url'] = $urlData['url'] ?? '';
                 $responseData['size'] = $service->formatFileSize($urlData['size'] ?? 0);
+                $responseData['size_bytes'] = (int)($urlData['size'] ?? 0);
                 $responseData['level'] = $urlData['level'] ?? $level;
                 $responseData['type'] = $urlData['type'] ?? null;
             } else {
                 $responseData['url'] = '';
                 $responseData['size'] = '获取失败';
+                $responseData['size_bytes'] = 0;
             }
 
             APIResponse::success($responseData, '获取歌曲信息成功');
@@ -604,6 +625,38 @@ function handleGetAlbum(MusicAPIService $service): void
         'status' => 200,
         'album' => $result,
     ], '获取专辑详情成功');
+}
+
+/**
+ * 处理获取官方排行榜
+ * 不传 id 参数时返回所有榜单列表; 传 id 时返回该榜单详情 (含完整歌曲列表)
+ *
+ * 排行榜本质是系统歌单, 榜单详情复用 getPlaylistDetail
+ */
+function handleGetToplist(MusicAPIService $service): void
+{
+    $data = $service->getRequestData();
+    $cookies = $service->getCookies();
+    $api = $service->getApi();
+
+    // 不传 id 时返回所有榜单列表
+    if (empty($data['id'])) {
+        $list = $api->getToplistList($cookies);
+        APIResponse::success([
+            'status' => 200,
+            'list' => $list,
+        ], '获取官方排行榜列表成功');
+        return;
+    }
+
+    // 传 id 时返回该榜单详情 (复用歌单详情逻辑)
+    $toplistId = $data['id'];
+    $result = $api->getPlaylistDetail($toplistId, $cookies);
+
+    APIResponse::success([
+        'status' => 200,
+        'playlist' => $result,
+    ], '获取排行榜详情成功');
 }
 
 /**
@@ -739,8 +792,147 @@ function handleDownloadMusic(MusicAPIService $service): void
 }
 
 /**
- * 处理生成二维码key
+ * 处理批量打包下载为 ZIP
+ *
+ * 接收参数:
+ *   ids: 歌曲ID列表, 逗号分隔字符串 (如 "123,456,789") 或 JSON 数组字符串
+ *   quality: 音质, 默认 lossless
+ *   name: ZIP 文件名 (不含扩展名), 默认 "songs"
+ *   format: 返回格式, file (默认, 流式输出 ZIP) | json (返回元信息)
+ *
+ * 流程:
+ * 1. 依次下载每首歌曲到本地 download 目录 (复用已存在文件, 加速重复下载)
+ * 2. 使用 ZipArchive 打包所有成功下载的文件
+ * 3. 流式输出 ZIP 给客户端, 完成后删除临时 ZIP 文件
  */
+function handleDownloadBatchZip(MusicAPIService $service): void
+{
+    $data = $service->getRequestData();
+    $idsRaw = $data['ids'] ?? ($data['id'] ?? '');
+    $quality = $data['quality'] ?? 'lossless';
+    $zipName = $data['name'] ?? 'songs';
+    $returnFormat = $data['format'] ?? 'file';
+
+    // 解析歌曲 ID 列表 (支持逗号分隔字符串 / JSON 数组字符串)
+    $musicIds = [];
+    if (is_array($idsRaw)) {
+        $musicIds = $idsRaw;
+    } else {
+        $decoded = json_decode($idsRaw, true);
+        if (is_array($decoded)) {
+            $musicIds = $decoded;
+        } else {
+            $musicIds = array_values(array_filter(explode(',', (string)$idsRaw), fn($s) => trim($s) !== ''));
+        }
+    }
+    $musicIds = array_map(fn($id) => is_string($id) ? trim($id) : $id, $musicIds);
+    $musicIds = array_values(array_unique(array_filter($musicIds, fn($id) => $id !== '' && $id !== null)));
+
+    if (empty($musicIds)) {
+        APIResponse::error("参数 'ids' 不能为空, 支持逗号分隔字符串或 JSON 数组");
+    }
+    if (count($musicIds) > 200) {
+        APIResponse::error('单次打包下载不能超过 200 首歌曲');
+    }
+    if (!in_array($quality, QUALITY_LEVELS)) {
+        APIResponse::error("无效的音质参数，支持: " . implode(', ', QUALITY_LEVELS));
+    }
+    if (!in_array($returnFormat, ['file', 'json'])) {
+        APIResponse::error("返回格式只支持 'file' 或 'json'");
+    }
+
+    // 批量下载并打包为 ZIP
+    $downloader = $service->getDownloader();
+    try {
+        $result = $downloader->downloadBatchAsZip($musicIds, $quality, $zipName);
+    } catch (DownloadException $e) {
+        APIResponse::error($e->getMessage());
+    }
+
+    // json 模式仅返回元信息
+    if ($returnFormat === 'json') {
+        APIResponse::success([
+            'total' => $result['total'],
+            'succeeded' => $result['succeeded'],
+            'failed' => $result['failed'],
+            'errors' => $result['errors'],
+            'zip_filename' => $result['zipFilename'],
+            'zip_size' => filesize($result['zipPath']),
+        ], "打包完成: {$result['succeeded']}/{$result['total']} 成功");
+        return;
+    }
+
+    // file 模式: 流式输出 ZIP 文件
+    $zipPath = $result['zipPath'];
+    $zipFilename = $result['zipFilename'];
+    if (!file_exists($zipPath)) {
+        APIResponse::error('ZIP 文件不存在', 404);
+    }
+
+    $encodedFilename = rawurlencode($zipFilename);
+    // 透传统计信息给前端 (通过自定义响应头)
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . $zipFilename . '"; filename*=UTF-8\'\'' . $encodedFilename);
+    header('Content-Length: ' . filesize($zipPath));
+    header('X-Download-Filename: ' . $encodedFilename);
+    header('X-Zip-Total: ' . $result['total']);
+    header('X-Zip-Succeeded: ' . $result['succeeded']);
+    header('X-Zip-Failed: ' . $result['failed']);
+    header('Cache-Control: no-cache, no-store, must-revalidate');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+
+    // 关闭输出缓冲, 确保 readfile 流式输出
+    while (ob_get_level() > 0) {
+        ob_end_flush();
+    }
+
+    readfile($zipPath);
+
+    // 删除临时 ZIP 文件 (客户端下载完成后)
+    @unlink($zipPath);
+    exit;
+}
+
+/**
+ * 检测 Cookie 状态 (支持多 Cookie)
+ */
+function handleCookieStatus(): void
+{
+    $cookieSets = MusicAPI::loadAllCookieSets();
+    $api = new MusicAPI();
+
+    $results = [];
+    foreach ($cookieSets as $index => $cookies) {
+        $status = $api->checkCookieStatus($cookies);
+        $results[] = [
+            'index' => $index + 1,
+            'status' => $status['status'],
+            'nickname' => $status['nickname'],
+            'user_id' => $status['user_id'],
+            'vip_type' => $status['vip_type'],
+            'message' => $status['message'],
+            'has_music_u' => isset($cookies['MUSIC_U']),
+        ];
+    }
+
+    // 统计
+    $total = count($results);
+    $vipCount = count(array_filter($results, fn($r) => $r['status'] === 'vip'));
+    $normalCount = count(array_filter($results, fn($r) => $r['status'] === 'normal'));
+    $invalidCount = count(array_filter($results, fn($r) => $r['status'] === 'invalid'));
+
+    APIResponse::success([
+        'cookies' => $results,
+        'summary' => [
+            'total' => $total,
+            'vip' => $vipCount,
+            'normal' => $normalCount,
+            'invalid' => $invalidCount,
+        ],
+    ], $total > 0 ? "检测到 {$total} 个 Cookie" : '未配置 Cookie');
+}
+
 function handleQrKey(MusicAPIService $service): void
 {
     $api = $service->getApi();

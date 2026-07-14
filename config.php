@@ -36,6 +36,8 @@ define('LYRIC_API', 'https://interface3.music.163.com/api/song/lyric');
 define('SEARCH_API', 'https://music.163.com/api/cloudsearch/pc');
 define('PLAYLIST_DETAIL_API', 'https://music.163.com/api/v6/playlist/detail');
 define('ALBUM_DETAIL_API', 'https://music.163.com/api/v1/album/');
+define('TOPLIST_API', 'https://music.163.com/api/toplist'); // 官方排行榜列表
+define('TOPLIST_DETAIL_API', 'https://music.163.com/api/v3/playlist/detail'); // 排行榜详情(同歌单接口)
 define('QR_UNIKEY_API', 'https://interface3.music.163.com/eapi/login/qrcode/unikey');
 define('QR_LOGIN_API', 'https://interface3.music.163.com/eapi/login/qrcode/client/login');
 
